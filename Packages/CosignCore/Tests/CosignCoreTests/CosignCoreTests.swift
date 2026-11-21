@@ -532,6 +532,7 @@ final class CosignCoreTests: XCTestCase {
             debaterIDs: debaters.map(\.id),
             mode: .build,
             hasExplicitBuildFolder: true,
+            completenessReviewEnabled: false,
             workspacePath: tempBuildDir.path
         )
 
@@ -633,7 +634,175 @@ final class CosignCoreTests: XCTestCase {
         XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.forgeID && $0.name == "Forge" }))
         XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.emberID && $0.name == "Ember" }))
         XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.rookID && $0.name == "Rook" }))
+        XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.wardenID && $0.name == "Warden" }))
         XCTAssertTrue(mergedPresets.contains(where: { $0.id == DefaultRoster.taskBuildCrewPresetID && $0.name == "Task & Build Crew" }))
+    }
+
+    func testCompletenessReviewerRemediationLoopAndBlockerEscapeHatch() async throws {
+        let allPersonas = DefaultRoster.personas
+        let moderator = allPersonas.first { $0.id == DefaultRoster.atlasID }!
+        let debaters = [
+            allPersonas.first { $0.id == DefaultRoster.emberID }!,
+            allPersonas.first { $0.id == DefaultRoster.rookID }!,
+        ]
+        // Warden uses OpenAI (.codex), auditing an AGY Chair + Gemini/Claude build crew!
+        let warden = allPersonas.first { $0.id == DefaultRoster.wardenID }!
+        let tempBuildDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-completeness-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempBuildDir) }
+
+        let auditCalls = LockedBox<Int>(0)
+
+        let runner = FakeModelRunner { req in
+            if req.systemPrompt.contains("BUILD MODE INTAKE") {
+                return ModelCallResponse(rawText: """
+                {"session_title": "Survive Night One", "needs_interview": false, "questions": []}
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("ARCHITECTURE & WORKSTREAM HUDDLE") {
+                return ModelCallResponse(rawText: """
+                {"stance": "building", "spoken_take": "Let's wire character prefabs and onboarding hints.", "supporting_notes": "Plan"}
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("CONCRETE MULTI-AGENT BUILD BLUEPRINT") {
+                return ModelCallResponse(rawText: """
+                {
+                  "headline": "Ship Night One Visuals & Onboarding",
+                  "spoken_verdict": "Ember wires prefabs and onboarding, Rook runs QA.",
+                  "recommendation": "Wire 4 Synty prefabs into StreetKit and add judge HUD hint.",
+                  "action_steps": ["Wire 4 Synty prefabs into StreetKit", "Upload signed build to Steamworks"],
+                  "cosigned_by": ["Ember", "Rook"],
+                  "should_auto_execute": true,
+                  "execution_assignments": [
+                    {
+                      "assigned_to": "Ember",
+                      "task_instruction": "Stage prefabs and wire StreetKit",
+                      "target_scope": "StreetKit.cs"
+                    }
+                  ]
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("ASSIGNED TASK:") {
+                return ModelCallResponse(rawText: """
+                {"stance": "executing", "spoken_take": "Staged prefabs.", "supporting_notes": "Initial pass"}
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("ADVERSARIAL QA & VERIFICATION GATE") {
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "verifying",
+                  "verification_passed": true,
+                  "spoken_take": "42/42 EditMode tests compile and pass.",
+                  "files_summary": ["StreetKit.cs — staged assets"],
+                  "how_to_run": "unity -runTests"
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("100% SPEC-TO-DISK COMPLETENESS AUDIT") {
+                XCTAssertEqual(req.provider, warden.provider)
+                XCTAssertEqual(req.toolPhase, .researchAndInspect)
+                let passNum = auditCalls.withLock { n -> Int in
+                    n += 1
+                    return n
+                }
+                if passNum == 1 {
+                    return ModelCallResponse(rawText: """
+                    {
+                      "stance": "challenging",
+                      "is_complete": false,
+                      "completeness_percent": 65,
+                      "spoken_take": "Tests pass, but StreetKit still leaves the four character visual slots null, and Steamworks upload hasn't been addressed.",
+                      "missing_items": [
+                        "Assign the 4 Synty character prefabs into StreetKit slots instead of fallback capsules",
+                        "Upload build to Steamworks or document credential blocker"
+                      ],
+                      "accepted_blockers": [],
+                      "supporting_notes": "Audited StreetKit.prefab on disk.",
+                      "key_points": ["65% complete", "2 missing items"]
+                    }
+                    """, durationMs: 25)
+                } else {
+                    // Ensure Pass 2 receives the team's documented blocker reason in userPrompt!
+                    XCTAssertTrue(req.userPrompt.contains("TEAM BLOCKER REASON") || req.userPrompt.contains("Steamworks VDF credentials"))
+                    return ModelCallResponse(rawText: """
+                    {
+                      "stance": "cosigning",
+                      "is_complete": true,
+                      "completeness_percent": 100,
+                      "spoken_take": "Verified on disk: all four Synty prefabs are wired into StreetKit with zero capsule fallbacks, and the missing Steamworks credentials blocker is valid.",
+                      "missing_items": [],
+                      "accepted_blockers": ["Steamworks upload blocked: no SteamCMD credentials configured on local machine"],
+                      "files_summary": ["StreetKit.cs — wired 4 Synty prefabs", "NightOneBuild.cs — verified references"],
+                      "how_to_run": "open Builds/SurviveNightOne.app",
+                      "supporting_notes": "100% of solvable scope verified.",
+                      "key_points": ["100% complete", "1 valid external blocker accepted"]
+                    }
+                    """, durationMs: 25)
+                }
+            } else if req.systemPrompt.contains("DISPATCH SURGICAL REMEDIATION WORKSTREAMS") {
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "moderating",
+                  "spoken_take": "Warden caught the unassigned prefab slots. Ember, wire all four prefabs into StreetKit and check SteamCMD.",
+                  "execution_assignments": [
+                    {
+                      "assigned_to": "Ember",
+                      "task_instruction": "Wire all 4 Synty prefabs into StreetKit and verify SteamCMD availability",
+                      "target_scope": "StreetKit.cs"
+                    }
+                  ]
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("COMPLETENESS REMEDIATION WORKSTREAM") {
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "executing",
+                  "spoken_take": "Wired all four Synty prefabs directly into StreetKit and re-ran tests. SteamCMD upload is blocked because no Steamworks VDF credentials exist on this machine.",
+                  "files_summary": ["StreetKit.cs — wired all 4 Synty prefabs"],
+                  "unresolvable_reasons": ["Steamworks VDF credentials are not present on this local machine"],
+                  "how_to_run": "open Builds/SurviveNightOne.app"
+                }
+                """, durationMs: 20)
+            }
+            return ModelCallResponse(rawText: "{}", durationMs: 10)
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        let session = DebateSession(
+            moderatorID: moderator.id,
+            debaterIDs: debaters.map(\.id),
+            mode: .build,
+            hasExplicitBuildFolder: true,
+            completenessReviewEnabled: true,
+            completenessReviewerID: warden.id,
+            workspacePath: tempBuildDir.path
+        )
+
+        let finished = try await orchestrator.submitUserMessage(
+            text: "Wire the 4 Synty character prefabs into StreetKit and upload to Steamworks.",
+            into: session,
+            moderator: moderator,
+            debaters: debaters,
+            allPersonas: allPersonas
+        ) { _ in }
+
+        XCTAssertEqual(finished.stage, .completed)
+        XCTAssertEqual(auditCalls.withLock { $0 }, 2)
+
+        let turns = finished.entries.compactMap { entry -> DebateTurn? in
+            if case .turn(let t) = entry { return t }
+            return nil
+        }
+        XCTAssertTrue(turns.contains(where: { $0.personaName == "Warden" && $0.stance == .challenging }))
+        XCTAssertTrue(turns.contains(where: { $0.personaName == "Warden" && $0.stance == .cosigning }))
+
+        let verdict = finished.entries.compactMap { entry -> CosignVerdict? in
+            if case .verdict(let v) = entry { return v }
+            return nil
+        }.first
+        XCTAssertEqual(verdict?.buildReport?.completenessReviewerName, "Warden (OpenAI)")
+        XCTAssertEqual(verdict?.buildReport?.completenessPercent, 100)
+        XCTAssertEqual(verdict?.buildReport?.completenessIterations, 2)
+        XCTAssertEqual(
+            verdict?.buildReport?.acceptedBlockers,
+            ["Steamworks upload blocked: no SteamCMD credentials configured on local machine"]
+        )
+        XCTAssertEqual(verdict?.buildReport?.howToRun, "open Builds/SurviveNightOne.app")
     }
 
     func testRunUntilConsensusChairMediatedConvergence() async throws {

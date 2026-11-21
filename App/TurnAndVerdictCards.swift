@@ -708,6 +708,47 @@ struct CosignVerdictCardView: View {
                         .foregroundStyle(StudioTheme.inkSecondary)
                         .textSelection(.enabled)
 
+                    if let reviewerName = report.completenessReviewerName {
+                        let pct = report.completenessPercent ?? 100
+                        let passes = report.completenessIterations ?? 1
+                        HStack(spacing: 6) {
+                            Image(systemName: pct >= 100 ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(pct >= 100 ? StudioTheme.emerald : StudioTheme.brassBright)
+                            Text("\(pct)% COMPLETENESS SIGNED OFF BY \(reviewerName.uppercased()) (\(passes) PASS\(passes == 1 ? "" : "ES"))")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .tracking(0.7)
+                                .foregroundStyle(pct >= 100 ? StudioTheme.emerald : StudioTheme.brassBright)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill((pct >= 100 ? StudioTheme.emerald : StudioTheme.brassBright).opacity(0.12)))
+                    }
+
+                    if let blockers = report.acceptedBlockers, !blockers.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("ACCEPTED EXTERNAL BLOCKERS")
+                                .font(.system(size: 9.5, weight: .heavy, design: .rounded))
+                                .tracking(0.8)
+                                .foregroundStyle(StudioTheme.brassBright)
+                            ForEach(blockers, id: \.self) { blocker in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "info.circle.fill")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(StudioTheme.brassBright)
+                                        .padding(.top, 2.5)
+                                    Text(blocker)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(StudioTheme.inkSecondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        .padding(9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(StudioTheme.brass.opacity(0.08)))
+                    }
+
                     if !report.verificationSummary.isEmpty {
                         Text(report.verificationSummary)
                             .font(.system(size: 13))
@@ -1435,6 +1476,66 @@ struct BuildLaunchSheet: View {
                     }
                 }
 
+                // Completeness Reviewer Gate (Toggle + Persona Selector)
+                VStack(alignment: .leading, spacing: 8) {
+                    let reviewOn = session.isCompletenessReviewOn
+                    let reviewer = model.completenessReviewer(for: session)
+                    HStack {
+                        Text("100% COMPLETENESS REVIEWER LOOP")
+                            .font(.system(size: 10, weight: .heavy, design: .rounded))
+                            .tracking(0.9)
+                            .foregroundStyle(reviewOn ? StudioTheme.emerald : StudioTheme.inkMuted)
+                        Spacer()
+                        Toggle(isOn: Binding(
+                            get: { session.isCompletenessReviewOn },
+                            set: { model.setCurrentSessionCompletenessReview($0) }
+                        )) {
+                            Text(reviewOn ? "Enabled" : "Off")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(reviewOn ? StudioTheme.emerald : StudioTheme.inkMuted)
+                        }
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    }
+
+                    if reviewOn {
+                        HStack(spacing: 10) {
+                            Image(systemName: reviewer.avatarSymbol)
+                                .foregroundStyle(Color(hex: reviewer.accentHex))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(reviewer.name) — \(reviewer.title)")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(StudioTheme.inkPrimary)
+                                Text("\(reviewer.provider.displayName) · \(model.displayLabel(for: reviewer.provider, modelID: reviewer.modelID))")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(StudioTheme.inkSecondary)
+                            }
+                            Spacer()
+                            Menu {
+                                ForEach(model.personas) { candidate in
+                                    let modelName = model.displayLabel(for: candidate.provider, modelID: candidate.modelID)
+                                    Button {
+                                        model.setCurrentSessionCompletenessReviewer(candidate.id)
+                                    } label: {
+                                        HStack {
+                                            Text("\(candidate.name) — \(candidate.title) (\(candidate.provider.shortName) · \(modelName))")
+                                            if reviewer.id == candidate.id {
+                                                Image(systemName: "checkmark")
+                                            }
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Text("Change Persona…")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(StudioTheme.drawerBg))
+                    }
+                }
+
                 // Optional Extra Build Note
                 VStack(alignment: .leading, spacing: 6) {
                     Text("OPTIONAL BUILD SCOPE / EXTRA INSTRUCTIONS")
@@ -1442,13 +1543,22 @@ struct BuildLaunchSheet: View {
                         .tracking(0.9)
                         .foregroundStyle(StudioTheme.inkMuted)
 
-                    TextField("e.g. Build Phase 1 MVP first, or use Swift 6 + SwiftUI…", text: $extraNote, axis: .vertical)
-                        .lineLimit(2...4)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13))
-                        .foregroundStyle(StudioTheme.inkPrimary)
-                        .padding(11)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(StudioTheme.drawerBg))
+                    ZStack(alignment: .topLeading) {
+                        if extraNote.isEmpty {
+                            Text("e.g. Build Phase 1 MVP first, or use Swift 6 + SwiftUI…")
+                                .font(.system(size: 13))
+                                .foregroundStyle(StudioTheme.inkMuted.opacity(0.75))
+                                .padding(11)
+                                .allowsHitTesting(false)
+                        }
+                        TextField("", text: $extraNote, axis: .vertical)
+                            .lineLimit(2...4)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .foregroundStyle(StudioTheme.inkPrimary)
+                            .padding(11)
+                    }
+                    .background(RoundedRectangle(cornerRadius: 10).fill(StudioTheme.drawerBg))
                 }
 
                 Spacer(minLength: 0)
@@ -1478,7 +1588,7 @@ struct BuildLaunchSheet: View {
             }
             .padding(22)
         }
-        .frame(minWidth: 560, idealWidth: 660, maxWidth: .infinity, minHeight: 400, idealHeight: 440, maxHeight: .infinity)
+        .frame(minWidth: 560, idealWidth: 660, maxWidth: .infinity, minHeight: 470, idealHeight: 520, maxHeight: .infinity)
         .background(StudioTheme.canvasTop)
         .preferredColorScheme(.dark)
         .onAppear {

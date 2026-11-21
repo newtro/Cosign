@@ -8,7 +8,9 @@ public enum JSONExtractor {
         "headline", "spoken_verdict", "recommendation", "action_steps",
         "key_tradeoffs", "cosigned_by", "dissents", "should_auto_execute",
         "execution_assignments", "verification_passed", "issues_found",
-        "files_summary", "how_to_run", "consensus_reached"
+        "files_summary", "how_to_run", "consensus_reached",
+        "completeness_percent", "is_complete", "missing_items",
+        "accepted_blockers", "unresolvable_reasons"
     ]
 
     /// Extracts the outermost JSON object `{ ... }` from an LLM response even if wrapped in markdown fences,
@@ -885,6 +887,142 @@ public enum DebatePrompts {
           "supporting_notes": "Details of fixes and passing test output.",
           "key_points": ["All QA issues resolved", "Build & tests green"],
           "tools_used": "Files edited and verification commands re-run"
+        }
+        """
+    }
+
+    // MARK: - Independent Completeness Audit & Remediation Loop Prompts
+
+    public static func completenessAuditSystemPrompt(
+        reviewer: Persona,
+        moderatorName: String,
+        teamNames: [String],
+        iteration: Int,
+        workspacePath: String?
+    ) -> String {
+        let teamList = ([moderatorName] + teamNames).joined(separator: ", ")
+        return """
+        You are \(reviewer.name), \(reviewer.title), acting as the **INDEPENDENT COMPLETENESS REVIEWER** (Audit Pass \(iteration)) after the build team (\(teamList)) reported completion inside `\(workspacePath ?? ".")`.
+        Personality & Standards:
+        \(reviewer.personality)
+        Style:
+        \(reviewer.debateStyle)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
+
+        YOUR TASK — 100% SPEC-TO-DISK COMPLETENESS AUDIT (PASS \(iteration)):
+        Do NOT take the team's spoken summaries or unit-test counts at face value! Use your CLI tools (`Read`, `Grep`/`rg`, `Glob`, `git status/diff`, build/test inspection) inside `\(workspacePath ?? ".")` to verify 100% end-to-end delivery:
+        1. Read the user's prompt(s), any referenced design/handoff docs on disk, and every promise in the team's own Build Blueprint (`action_steps` & workstreams).
+        2. Hunt specifically for half-finished shortcuts hiding behind green unit tests:
+           - Placeholder primitives/capsules (`CreatePrimitive`, dummy boxes, mock strings) standing in where real assets, models, animations, or data already exist or were promised.
+           - Assets, scripts, or components staged on disk but left `null`, unwired, or unreachable in actual scenes, entrypoints, or build scripts.
+           - `TODO`, `FIXME`, `NotImplemented`, stubbed handlers, missing controls/keybindings, missing cold-start onboarding/UX hints, or unbuilt final artifacts/apps.
+           - Any requirement from the user's prompt or team blueprint that was silently skipped or watered down.
+        3. EVALUATING TEAM BLOCKER REASONS:
+           - If the team explicitly provided a concrete, legitimate technical or external blocker for a specific item (e.g. missing external hardware, unavailable third-party credentials, or hard OS/engine limitation that genuinely cannot be solved locally), verify the claim and, if truthful, record it in `accepted_blockers` rather than `missing_items`.
+           - REJECT weak excuses ("kept a placeholder for now", "deferred to Phase 2", "ran out of time", "tests already pass")—put those straight into `missing_items`!
+        4. Set `is_complete` to `true` (and `completeness_percent` to `100` or the full solvable ceiling) ONLY when `missing_items` is completely empty! Otherwise set `is_complete` to `false` and list every concrete gap in `missing_items` with exact file paths and what must be built/wired so \(moderatorName) can fire it right back to the team.
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "stance": "verifying",
+          "is_complete": false,
+          "completeness_percent": 70,
+          "spoken_take": "3-5 sharp spoken sentences in character delivering your completeness verdict and calling out exact gaps or signing off at 100%.",
+          "missing_items": [
+            "Exact requirement/wiring missed + file paths + what the team must build/wire to reach 100%"
+          ],
+          "accepted_blockers": [
+            "Optional: any item genuinely blocked by a verified external constraint + the valid reason"
+          ],
+          "files_summary": ["Key verified file — status"],
+          "how_to_run": "Exact command(s) to launch or verify the finished build",
+          "supporting_notes": "Line-by-line spec & blueprint audit matrix vs actual files on disk.",
+          "key_points": ["Completeness score", "Top gap or sign-off"],
+          "tools_used": "Exact files, searches, and checks inspected"
+        }
+        """
+    }
+
+    public static func completenessRemediationPlanPrompt(
+        moderator: Persona,
+        debaters: [Persona],
+        reviewerName: String,
+        missingItems: [String],
+        iteration: Int,
+        workspacePath: String?
+    ) -> String {
+        let roster = ([moderator] + debaters).map { "\($0.name) (\($0.title))" }.joined(separator: ", ")
+        let bullets = missingItems.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+        return """
+        You are \(moderator.name), \(moderator.title), leading **COMPLETENESS REMEDIATION PASS \(iteration)** in `\(workspacePath ?? ".")` across (\(roster)).
+        Personality: \(moderator.personality)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
+
+        \(reviewerName) (Completeness Reviewer) audited the build and REJECTED sign-off with these exact gaps:
+        \(bullets)
+
+        YOUR TASK — DISPATCH SURGICAL REMEDIATION WORKSTREAMS:
+        1. Break EVERY single item above into **1 to 4 sequential, non-overlapping `execution_assignments`** assigned (`assigned_to`) to the best-suited council members (\(roster)), including rebuilding any final app/artifact and running full verification!
+        2. If—and ONLY if—a specific item genuinely CANNOT be solved locally due to a hard external/environmental blocker, assign an engineer to verify and document the exact technical proof in `unresolvable_reasons` (never use excuses for solvable engineering/wiring work!).
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "stance": "moderating",
+          "spoken_take": "2-3 decisive spoken sentences dispatching the team to close every gap \(reviewerName) caught.",
+          "supporting_notes": "How the punch-list is divided across sequential single-writer workstreams.",
+          "key_points": ["Remediation Pass \(iteration)"],
+          "execution_assignments": [
+            {
+              "assigned_to": "Exact Persona First Name",
+              "task_instruction": "Complete exact missing feature/wiring/build and verify on disk.",
+              "target_scope": "Specific files or folders"
+            }
+          ]
+        }
+        """
+    }
+
+    public static func completenessRemediationExecutionPrompt(
+        executor: Persona,
+        moderatorName: String,
+        reviewerName: String,
+        assignment: ExecutionAssignment,
+        workspacePath: String?
+    ) -> String {
+        return """
+        You are \(executor.name), \(executor.title), executing a **COMPLETENESS REMEDIATION WORKSTREAM** dispatched by \(moderatorName) to close gaps flagged by \(reviewerName) inside `\(workspacePath ?? ".")`.
+        Personality: \(executor.personality)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: true))
+
+        ASSIGNED REMEDIATION TASK:
+        \(assignment.taskInstruction)
+        Target Scope: \(assignment.targetScope.isEmpty ? "As needed in workspace" : assignment.targetScope)
+
+        RULES:
+        - Implement the full, real solution on disk—zero placeholders, zero stubbed methods, zero unwired assets!
+        - Run the build/compiler/tests to confirm your work compiles and integrates cleanly.
+        - ONLY if a specific sub-requirement is genuinely impossible due to a verified external constraint (e.g. missing external API key or hardware), document the exact technical proof in `unresolvable_reasons`; otherwise leave `unresolvable_reasons` as `[]`.
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "stance": "executing",
+          "target_persona": "\(reviewerName)",
+          "spoken_take": "2-4 crisp spoken sentences reporting the exact gaps you closed and verified on disk.",
+          "unresolvable_reasons": [],
+          "files_summary": ["File created/updated — what was completed"],
+          "how_to_run": "Updated command to run/test if applicable, or empty string",
+          "supporting_notes": "Detailed summary of changes and build/test verification.",
+          "key_points": ["Gap closed", "Verification status"],
+          "tools_used": "Exact files edited and commands run"
         }
         """
     }

@@ -210,11 +210,18 @@ struct CouncilStageHeader: View {
     }
 
     private func seatsStrip(moderator: Persona, debaters: [Persona], expandToFill: Bool) -> some View {
-        HStack(spacing: 10) {
+        let showAuditor = session.activeMode == .build && session.isCompletenessReviewOn
+        let auditor = showAuditor ? model.completenessReviewer(for: session) : nil
+        let isExternalAuditor = auditor != nil
+            && auditor?.id != moderator.id
+            && !debaters.contains(where: { $0.id == auditor?.id })
+
+        return HStack(spacing: 10) {
             CouncilSeatCard(
                 persona: moderator,
                 modelLabel: model.displayLabel(for: moderator.provider, modelID: moderator.modelID),
                 isModerator: true,
+                isAuditor: auditor?.id == moderator.id,
                 isThinking: model.activeThinkerIDs.contains(moderator.id),
                 isSpeaking: model.voiceEngine.activeItem?.persona.id == moderator.id && model.voiceEngine.isPlaying,
                 speakerLevel: model.voiceEngine.speakerLevel,
@@ -234,6 +241,7 @@ struct CouncilStageHeader: View {
                     persona: debater,
                     modelLabel: model.displayLabel(for: debater.provider, modelID: debater.modelID),
                     isModerator: false,
+                    isAuditor: auditor?.id == debater.id,
                     isThinking: model.activeThinkerIDs.contains(debater.id),
                     isSpeaking: model.voiceEngine.activeItem?.persona.id == debater.id && model.voiceEngine.isPlaying,
                     speakerLevel: model.voiceEngine.speakerLevel,
@@ -241,6 +249,27 @@ struct CouncilStageHeader: View {
                     expandToFill: expandToFill
                 ) {
                     model.openStudio(for: debater.id)
+                }
+            }
+
+            if isExternalAuditor, let auditor {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 1, height: 40)
+                    .padding(.horizontal, 2)
+
+                CouncilSeatCard(
+                    persona: auditor,
+                    modelLabel: model.displayLabel(for: auditor.provider, modelID: auditor.modelID),
+                    isModerator: false,
+                    isAuditor: true,
+                    isThinking: model.activeThinkerIDs.contains(auditor.id),
+                    isSpeaking: model.voiceEngine.activeItem?.persona.id == auditor.id && model.voiceEngine.isPlaying,
+                    speakerLevel: model.voiceEngine.speakerLevel,
+                    latestStance: latestStance(for: auditor.id, in: session),
+                    expandToFill: expandToFill
+                ) {
+                    model.openStudio(for: auditor.id)
                 }
             }
         }
@@ -254,6 +283,7 @@ struct CouncilSeatCard: View {
     let persona: Persona
     let modelLabel: String
     let isModerator: Bool
+    var isAuditor: Bool = false
     let isThinking: Bool
     let isSpeaking: Bool
     let speakerLevel: CGFloat
@@ -315,7 +345,16 @@ struct CouncilSeatCard: View {
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1.5)
                                 .background(Capsule().fill(StudioTheme.brass.opacity(0.18)))
-                        } else if let stance = latestStance {
+                        }
+                        if isAuditor {
+                            Text("AUDITOR")
+                                .font(.system(size: 8.5, weight: .heavy, design: .rounded))
+                                .tracking(0.6)
+                                .foregroundStyle(StudioTheme.emerald)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(Capsule().fill(StudioTheme.emerald.opacity(0.18)))
+                        } else if !isModerator, let stance = latestStance {
                             Image(systemName: stance.symbolName)
                                 .font(.system(size: 9.5, weight: .bold))
                                 .foregroundStyle(stanceColor(stance, fallback: accent))

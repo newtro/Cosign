@@ -522,6 +522,10 @@ public struct BuildReport: Codable, Hashable, Sendable {
     public var verificationSummary: String
     public var filesSummary: [String]
     public var howToRun: String
+    public var completenessReviewerName: String?
+    public var completenessPercent: Int?
+    public var completenessIterations: Int?
+    public var acceptedBlockers: [String]?
     public var completedAt: Date
 
     public init(
@@ -531,6 +535,10 @@ public struct BuildReport: Codable, Hashable, Sendable {
         verificationSummary: String,
         filesSummary: [String] = [],
         howToRun: String = "",
+        completenessReviewerName: String? = nil,
+        completenessPercent: Int? = nil,
+        completenessIterations: Int? = nil,
+        acceptedBlockers: [String]? = nil,
         completedAt: Date = Date()
     ) {
         self.buildFolder = buildFolder
@@ -539,6 +547,10 @@ public struct BuildReport: Codable, Hashable, Sendable {
         self.verificationSummary = verificationSummary
         self.filesSummary = filesSummary
         self.howToRun = howToRun
+        self.completenessReviewerName = completenessReviewerName
+        self.completenessPercent = completenessPercent
+        self.completenessIterations = completenessIterations
+        self.acceptedBlockers = acceptedBlockers
         self.completedAt = completedAt
     }
 }
@@ -892,6 +904,10 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
     public var mode: CouncilMode?
     /// True once the user explicitly selected or created a project build folder for this session.
     public var hasExplicitBuildFolder: Bool?
+    /// Per-session toggle for running an independent Completeness Reviewer loop at the end of a Build until 100% done (or justified blocker).
+    public var completenessReviewEnabled: Bool?
+    /// Selected Persona ID acting as the independent Completeness Reviewer for this session (defaults to `DefaultRoster.wardenID`).
+    public var completenessReviewerID: UUID?
     /// When true (default), personas have full CLI tools (repo/disk read, git, gh, MCP, web) and Chair-coordinated writes.
     public var cliToolsEnabled: Bool?
     /// Active working directory for CLI tools (e.g. a specific repo or repos parent folder).
@@ -905,6 +921,14 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
 
     public var runsUntilConsensus: Bool {
         maxRebuttalRounds <= 0
+    }
+
+    public var isCompletenessReviewOn: Bool {
+        completenessReviewEnabled ?? true
+    }
+
+    public var effectiveCompletenessReviewerID: UUID {
+        completenessReviewerID ?? DefaultRoster.wardenID
     }
 
     public var hasFullCLITools: Bool {
@@ -923,6 +947,8 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
         allowWebSearch: Bool = true,
         mode: CouncilMode? = .debate,
         hasExplicitBuildFolder: Bool? = nil,
+        completenessReviewEnabled: Bool? = false,
+        completenessReviewerID: UUID? = DefaultRoster.wardenID,
         cliToolsEnabled: Bool? = true,
         workspacePath: String? = nil,
         stage: SessionStage = .idle,
@@ -938,6 +964,8 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
         self.allowWebSearch = allowWebSearch
         self.mode = mode
         self.hasExplicitBuildFolder = hasExplicitBuildFolder
+        self.completenessReviewEnabled = completenessReviewEnabled
+        self.completenessReviewerID = completenessReviewerID
         self.cliToolsEnabled = cliToolsEnabled
         self.workspacePath = workspacePath
         self.stage = stage

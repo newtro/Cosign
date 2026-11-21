@@ -117,7 +117,7 @@ struct EmptyCouncilWelcomeView: View {
                     .foregroundStyle(StudioTheme.inkPrimary)
 
                 Text(isBuild
-                     ? "Pick or create a local folder. The council will align on architecture, divide sequential workstreams,\nwrite code, and run an adversarial QA & test verification gate."
+                     ? "Pick or create a local folder. The council aligns on architecture, executes workstreams,\nruns QA tests, and loops with your Completeness Reviewer until 100% of requirements are met."
                      : "Pitch a rough spark or tough decision. The panel will interview you on what's missing,\ndebate it aloud in compact turns, and deliver a Co-Signed Verdict.")
                     .font(.system(size: 13.5))
                     .lineSpacing(3.5)
@@ -452,6 +452,88 @@ struct StudioComposerDock: View {
                     }
                 }
                 .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: session.allowWebSearch))
+
+                if session.activeMode == .build {
+                    // Per-Session Completeness Reviewer Toggle & Persona Selector
+                    let reviewOn = session.isCompletenessReviewOn
+                    let reviewer = model.completenessReviewer(for: session)
+                    let reviewerAccent = Color(hex: reviewer.accentHex)
+
+                    Menu {
+                        Button {
+                            model.setCurrentSessionCompletenessReview(true)
+                        } label: {
+                            HStack {
+                                Text("Completeness Review Loop: ON (Audit to 100%)")
+                                if reviewOn {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+
+                        Button {
+                            model.setCurrentSessionCompletenessReview(false)
+                        } label: {
+                            HStack {
+                                Text("Completeness Review Loop: OFF")
+                                if !reviewOn {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+
+                        Divider()
+
+                        Section("Reviewer Persona (Any Model Provider)") {
+                            ForEach(model.personas) { candidate in
+                                let modelName = model.displayLabel(for: candidate.provider, modelID: candidate.modelID)
+                                Button {
+                                    model.setCurrentSessionCompletenessReviewer(candidate.id)
+                                } label: {
+                                    HStack {
+                                        Text("\(candidate.name) — \(candidate.title)  (\(candidate.provider.shortName) · \(modelName))")
+                                        if reviewOn && reviewer.id == candidate.id {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Divider()
+
+                        Button {
+                            model.openStudio(for: reviewer.id)
+                        } label: {
+                            Label("Customize \(reviewer.name) / Create Reviewer Persona…", systemImage: "slider.horizontal.3")
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: reviewOn ? reviewer.avatarSymbol : "checkmark.shield")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(reviewOn ? reviewerAccent : StudioTheme.inkMuted)
+                            Text(reviewOn
+                                 ? "Reviewer: \(reviewer.name) · \(reviewer.provider.shortName)"
+                                 : "Reviewer Off")
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(StudioTheme.inkMuted)
+                        }
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(reviewOn ? StudioTheme.inkPrimary : StudioTheme.inkMuted)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(reviewOn ? reviewerAccent.opacity(0.15) : Color.white.opacity(0.045)))
+                        .overlay(Capsule().strokeBorder(reviewOn ? reviewerAccent.opacity(0.45) : Color.white.opacity(0.08), lineWidth: 1))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(session.stage.isBusy)
+                    .help(reviewOn
+                          ? "Completeness Review ON: \(reviewer.name) (\(reviewer.provider.displayName)) will audit 100% of requirements at the end of the build and loop missed items back to the team until complete."
+                          : "Completeness Review OFF for this chat session. Click to enable and pick a reviewer persona.")
+                }
 
                 if session.activeMode == .debate {
                     // Rebuttal Depth Menu (1, 2, 3, 5, 8, or Run Until Consensus)

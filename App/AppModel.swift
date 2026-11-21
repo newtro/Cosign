@@ -83,6 +83,12 @@ final class AppModel: ObservableObject {
                 if copy.cliToolsEnabled == nil {
                     copy.cliToolsEnabled = true
                 }
+                if copy.completenessReviewEnabled == nil {
+                    copy.completenessReviewEnabled = loadedPrefs.defaultCompletenessReviewEnabled ?? true
+                }
+                if copy.completenessReviewerID == nil {
+                    copy.completenessReviewerID = loadedPrefs.defaultCompletenessReviewerID ?? DefaultRoster.wardenID
+                }
                 if DebateOrchestrator.healSessionIfNeeded(&copy) {
                     store.saveSession(copy)
                 }
@@ -122,6 +128,13 @@ final class AppModel: ObservableObject {
         let resolved = session.debaterIDs.compactMap { persona(for: $0) }
         if !resolved.isEmpty { return resolved }
         return Array(personas.filter { $0.role == .debater }.prefix(3))
+    }
+
+    func completenessReviewer(for session: DebateSession) -> Persona {
+        let targetID = session.effectiveCompletenessReviewerID
+        if let hit = persona(for: targetID) { return hit }
+        if let warden = persona(for: DefaultRoster.wardenID) { return warden }
+        return activeDebaters(for: session).last ?? activeModerator(for: session)
     }
 
     func displayLabel(for provider: AIProvider, modelID: String) -> String {
@@ -373,6 +386,27 @@ final class AppModel: ObservableObject {
         updateSessionInPlace(session)
     }
 
+    func setCurrentSessionCompletenessReview(_ enabled: Bool) {
+        preferences.defaultCompletenessReviewEnabled = enabled
+        store.savePreferences(preferences)
+        guard var session = currentSession else { return }
+        session.completenessReviewEnabled = enabled
+        if session.completenessReviewerID == nil {
+            session.completenessReviewerID = preferences.defaultCompletenessReviewerID ?? DefaultRoster.wardenID
+        }
+        updateSessionInPlace(session)
+    }
+
+    func setCurrentSessionCompletenessReviewer(_ personaID: UUID) {
+        preferences.defaultCompletenessReviewerID = personaID
+        preferences.defaultCompletenessReviewEnabled = true
+        store.savePreferences(preferences)
+        guard var session = currentSession else { return }
+        session.completenessReviewerID = personaID
+        session.completenessReviewEnabled = true
+        updateSessionInPlace(session)
+    }
+
     // MARK: - Running Debates & Interviews
 
     func sendPrompt(_ text: String, skipInterview: Bool = false) {
@@ -396,6 +430,7 @@ final class AppModel: ObservableObject {
 
         let moderator = activeModerator(for: session)
         let debaters = activeDebaters(for: session)
+        let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
 
@@ -408,6 +443,7 @@ final class AppModel: ObservableObject {
                     into: session,
                     moderator: moderator,
                     debaters: debaters,
+                    allPersonas: roster,
                     modelLabels: labels,
                     openRouterKey: orKey,
                     skipInterview: skipInterview
@@ -437,6 +473,7 @@ final class AppModel: ObservableObject {
 
         let moderator = activeModerator(for: session)
         let debaters = activeDebaters(for: session)
+        let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
 
@@ -451,6 +488,7 @@ final class AppModel: ObservableObject {
                     into: session,
                     moderator: moderator,
                     debaters: debaters,
+                    allPersonas: roster,
                     modelLabels: labels,
                     openRouterKey: orKey
                 ) { [weak self] event in
@@ -479,6 +517,7 @@ final class AppModel: ObservableObject {
 
         let moderator = activeModerator(for: session)
         let debaters = activeDebaters(for: session)
+        let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
 
@@ -490,6 +529,7 @@ final class AppModel: ObservableObject {
                     into: session,
                     moderator: moderator,
                     debaters: debaters,
+                    allPersonas: roster,
                     modelLabels: labels,
                     openRouterKey: orKey
                 ) { [weak self] event in
@@ -530,6 +570,7 @@ final class AppModel: ObservableObject {
 
         let moderator = activeModerator(for: session)
         let debaters = activeDebaters(for: session)
+        let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
 
@@ -543,6 +584,7 @@ final class AppModel: ObservableObject {
                     into: session,
                     moderator: moderator,
                     debaters: debaters,
+                    allPersonas: roster,
                     modelLabels: labels,
                     openRouterKey: orKey
                 ) { [weak self] event in
@@ -767,6 +809,14 @@ final class AppModel: ObservableObject {
         guard let target = persona(for: id), !target.isBuiltIn else { return }
         personas.removeAll { $0.id == id }
         store.savePersonas(personas)
+        if preferences.defaultCompletenessReviewerID == id {
+            preferences.defaultCompletenessReviewerID = DefaultRoster.wardenID
+            store.savePreferences(preferences)
+        }
+        for idx in sessions.indices where sessions[idx].completenessReviewerID == id {
+            sessions[idx].completenessReviewerID = DefaultRoster.wardenID
+            store.saveSession(sessions[idx])
+        }
     }
 
     func upsertPreset(_ preset: PanelPreset) {
@@ -798,6 +848,8 @@ final class AppModel: ObservableObject {
             maxRebuttalRounds: prefs.defaultMaxRebuttalRounds,
             allowWebSearch: prefs.defaultAllowWebSearch,
             mode: prefs.defaultMode ?? .debate,
+            completenessReviewEnabled: prefs.defaultCompletenessReviewEnabled ?? true,
+            completenessReviewerID: prefs.defaultCompletenessReviewerID ?? DefaultRoster.wardenID,
             cliToolsEnabled: prefs.defaultCLIToolsEnabled ?? true,
             workspacePath: prefs.defaultWorkspacePath ?? WorkspaceResolver.defaultWorkspacePath()
         )

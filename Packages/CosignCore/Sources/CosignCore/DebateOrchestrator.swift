@@ -37,6 +37,7 @@ public final class DebateOrchestrator: Sendable {
         into initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
+        allPersonas: [Persona] = [],
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
         skipInterview: Bool = false,
@@ -167,6 +168,7 @@ public final class DebateOrchestrator: Sendable {
                 session: session,
                 moderator: moderator,
                 debaters: debaters,
+                allPersonas: allPersonas,
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
                 isIncrementalFollowUp: hadPriorVerdict,
@@ -178,6 +180,7 @@ public final class DebateOrchestrator: Sendable {
             session: session,
             moderator: moderator,
             debaters: debaters,
+            allPersonas: allPersonas,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             isFollowUpRound: hadPriorVerdict,
@@ -192,6 +195,7 @@ public final class DebateOrchestrator: Sendable {
         into initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
+        allPersonas: [Persona] = [],
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
@@ -214,6 +218,7 @@ public final class DebateOrchestrator: Sendable {
                 session: session,
                 moderator: moderator,
                 debaters: debaters,
+                allPersonas: allPersonas,
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
                 isIncrementalFollowUp: false,
@@ -225,6 +230,7 @@ public final class DebateOrchestrator: Sendable {
             session: session,
             moderator: moderator,
             debaters: debaters,
+            allPersonas: allPersonas,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             isFollowUpRound: false,
@@ -238,6 +244,7 @@ public final class DebateOrchestrator: Sendable {
         into initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
+        allPersonas: [Persona] = [],
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
@@ -266,6 +273,7 @@ public final class DebateOrchestrator: Sendable {
                 session: session,
                 moderator: moderator,
                 debaters: debaters,
+                allPersonas: allPersonas,
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
                 isIncrementalFollowUp: hadPriorVerdict,
@@ -276,6 +284,7 @@ public final class DebateOrchestrator: Sendable {
             session: session,
             moderator: moderator,
             debaters: debaters,
+            allPersonas: allPersonas,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             isFollowUpRound: hadPriorVerdict,
@@ -284,13 +293,14 @@ public final class DebateOrchestrator: Sendable {
     }
 
     /// Runs Chair-coordinated sequential build execution + Adversarial QA Verification Gate + Auto-Fix Pass
-    /// inside `session.workspacePath` (either from Build Mode or when clicking "Build This Plan…" on a Debate Verdict).
+    /// + Optional Independent Completeness Reviewer & Remediation Loop inside `session.workspacePath`.
     public func executeVerdictPlan(
         verdictID: UUID,
         extraInstruction: String = "",
         into initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
+        allPersonas: [Persona] = [],
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
@@ -543,6 +553,272 @@ public final class DebateOrchestrator: Sendable {
             )))
         }
 
+        // --- INDEPENDENT COMPLETENESS REVIEWER & REMEDIATION LOOP (Until 100% Complete or Valid Blocker) ---
+        var finalCompletenessReviewerName: String?
+        var finalCompletenessPercent: Int?
+        var finalCompletenessPasses: Int?
+        var finalAcceptedBlockers: [String]?
+
+        if session.isCompletenessReviewOn {
+            let reviewer = resolveCompletenessReviewer(
+                for: session,
+                moderator: moderator,
+                debaters: debaters,
+                allPersonas: allPersonas
+            )
+            finalCompletenessReviewerName = "\(reviewer.name) (\(reviewer.provider.shortName))"
+            let maxCompletenessPasses = 6
+
+            for passIndex in 1...maxCompletenessPasses {
+                try Task.checkCancellation()
+                finalCompletenessPasses = passIndex
+                session.stage = .verifyingBuild
+                session.entries.append(.roundBanner(RoundBanner(
+                    roundNumber: 100 + passIndex,
+                    title: "Completeness Audit · Pass \(passIndex) (\(reviewer.name) · \(reviewer.provider.shortName))",
+                    subtitle: "Auditing 100% spec & blueprint delivery on disk in \(folderName)"
+                )))
+                await onEvent(.activeThinkersChanged(
+                    [reviewer.id],
+                    statusLabel: "Completeness Audit (Pass \(passIndex)): \(reviewer.name) (\(reviewer.provider.shortName)) is verifying 100% delivery…"
+                ))
+                await onEvent(.sessionUpdated(session))
+
+                let auditResp = try await runner.call(ModelCallRequest(
+                    provider: reviewer.provider,
+                    modelID: reviewer.modelID,
+                    effort: reviewer.effort,
+                    systemPrompt: DebatePrompts.completenessAuditSystemPrompt(
+                        reviewer: reviewer,
+                        moderatorName: moderator.name,
+                        teamNames: debaters.map(\.name),
+                        iteration: passIndex,
+                        workspacePath: targetFolder
+                    ),
+                    userPrompt: buildTranscriptContext(for: session),
+                    allowWebSearch: session.allowWebSearch,
+                    toolPhase: .researchAndInspect,
+                    workspacePath: targetFolder,
+                    openRouterAPIKey: openRouterKey
+                ))
+
+                let auditJSON = JSONExtractor.parseObject(auditResp.rawText)
+                let missingItems = (auditJSON?["missing_items"] as? [String])?
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+                let acceptedBlockers = (auditJSON?["accepted_blockers"] as? [String])?
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+                let explicitComplete = (auditJSON?["is_complete"] as? Bool)
+                let isComplete = explicitComplete ?? false
+                let pct = (auditJSON?["completeness_percent"] as? Int) ?? (isComplete ? 100 : 75)
+
+                if let auditedFiles = (auditJSON?["files_summary"] as? [String])?.filter({ !$0.isEmpty }) {
+                    for f in auditedFiles where !filesSummary.contains(f) {
+                        filesSummary.append(f)
+                    }
+                }
+                if let auditedRun = (auditJSON?["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !auditedRun.isEmpty {
+                    howToRun = auditedRun
+                }
+
+                let auditLabel = (isComplete && missingItems.isEmpty)
+                    ? "Completeness · 100% Signed Off"
+                    : "Completeness · \(pct)% (\(missingItems.count) Gap\(missingItems.count == 1 ? "" : "s"))"
+
+                let auditTurn = parseDebateTurn(
+                    raw: auditResp.rawText,
+                    durationMs: auditResp.durationMs,
+                    roundNumber: 100 + passIndex,
+                    roundLabel: auditLabel,
+                    persona: reviewer,
+                    modelLabel: modelLabels[reviewer.modelID] ?? reviewer.modelID,
+                    defaultStance: .verifying
+                )
+                session.entries.append(.turn(auditTurn))
+                session.updatedAt = Date()
+                await onEvent(.sessionUpdated(session))
+                await onEvent(.enqueueSpeech(SpeechQueueItem(
+                    id: auditTurn.id,
+                    persona: reviewer,
+                    spokenText: auditTurn.spokenTake,
+                    contextLabel: "Completeness · \(reviewer.name)"
+                )))
+
+                finalCompletenessPercent = (isComplete && missingItems.isEmpty) ? max(pct, 100) : pct
+                if !acceptedBlockers.isEmpty {
+                    finalAcceptedBlockers = acceptedBlockers
+                }
+
+                // Exit cleanly if 100% complete (or all remaining gaps are accepted legitimate blockers)!
+                if isComplete && missingItems.isEmpty {
+                    verificationPassed = true
+                    verificationSummary = auditTurn.spokenTake
+                    break
+                }
+
+                if passIndex == maxCompletenessPasses {
+                    verificationPassed = false
+                    verificationSummary = auditTurn.spokenTake
+                    break
+                }
+
+                // --- FIRE MISSED ITEMS BACK TO CHAIR & TEAM FOR REMEDIATION ---
+                try Task.checkCancellation()
+                session.stage = .synthesizingVerdict
+                session.entries.append(.roundBanner(RoundBanner(
+                    roundNumber: 110 + passIndex,
+                    title: "Remediation Pass \(passIndex) · Closing \(missingItems.count) Completeness Gap\(missingItems.count == 1 ? "" : "s")",
+                    subtitle: "\(moderator.name) & the team are resolving everything \(reviewer.name) flagged"
+                )))
+                await onEvent(.activeThinkersChanged(
+                    [moderator.id],
+                    statusLabel: "Remediation \(passIndex): \(moderator.name) is assigning \(missingItems.count) missed item(s) back to the team…"
+                ))
+                await onEvent(.sessionUpdated(session))
+
+                let remPlanResp = try await runner.call(ModelCallRequest(
+                    provider: moderator.provider,
+                    modelID: moderator.modelID,
+                    effort: moderator.effort,
+                    systemPrompt: DebatePrompts.completenessRemediationPlanPrompt(
+                        moderator: moderator,
+                        debaters: debaters,
+                        reviewerName: reviewer.name,
+                        missingItems: missingItems,
+                        iteration: passIndex,
+                        workspacePath: targetFolder
+                    ),
+                    userPrompt: buildTranscriptContext(for: session),
+                    allowWebSearch: session.allowWebSearch,
+                    toolPhase: .researchAndInspect,
+                    workspacePath: targetFolder,
+                    openRouterAPIKey: openRouterKey
+                ))
+
+                let remPlanTurn = parseDebateTurn(
+                    raw: remPlanResp.rawText,
+                    durationMs: remPlanResp.durationMs,
+                    roundNumber: 110 + passIndex,
+                    roundLabel: "Remediation Dispatch \(passIndex)",
+                    persona: moderator,
+                    modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
+                    defaultStance: .moderating
+                )
+                session.entries.append(.turn(remPlanTurn))
+                session.updatedAt = Date()
+                await onEvent(.sessionUpdated(session))
+                await onEvent(.enqueueSpeech(SpeechQueueItem(
+                    id: remPlanTurn.id,
+                    persona: moderator,
+                    spokenText: remPlanTurn.spokenTake,
+                    contextLabel: "Dispatch · \(moderator.name)"
+                )))
+
+                var remAssignments: [ExecutionAssignment] = []
+                if let remPlanJSON = JSONExtractor.parseObject(remPlanResp.rawText),
+                   let rawAssign = remPlanJSON["execution_assignments"] as? [[String: Any]] {
+                    for item in rawAssign.prefix(4) {
+                        guard let who = (item["assigned_to"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                              let instr = (item["task_instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                              !who.isEmpty, !instr.isEmpty else { continue }
+                        let scope = (item["target_scope"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        remAssignments.append(ExecutionAssignment(
+                            assignedPersonaName: who,
+                            taskInstruction: instr,
+                            targetScope: scope
+                        ))
+                    }
+                }
+                if remAssignments.isEmpty {
+                    let defaultBuilder = selectPrimaryBuilder(from: debaters, excluding: reviewer, fallback: moderator)
+                    let joinedMissing = missingItems.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+                    remAssignments = [
+                        ExecutionAssignment(
+                            assignedPersonaName: defaultBuilder.name,
+                            taskInstruction: "Resolve all completeness gaps flagged by \(reviewer.name):\n\(joinedMissing)",
+                            targetScope: targetFolder
+                        )
+                    ]
+                }
+
+                session.stage = .executingPlan
+                await onEvent(.sessionUpdated(session))
+
+                for (rIdx, remTask) in remAssignments.enumerated() {
+                    try Task.checkCancellation()
+                    let executor = allCouncil.first {
+                        $0.name.localizedCaseInsensitiveContains(remTask.assignedPersonaName)
+                        || remTask.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
+                    } ?? selectPrimaryBuilder(from: debaters, excluding: reviewer, fallback: moderator)
+
+                    await onEvent(.activeThinkersChanged(
+                        [executor.id],
+                        statusLabel: "Remediation \(passIndex) (\(rIdx + 1)/\(remAssignments.count)): \(executor.name) is completing missed items…"
+                    ))
+
+                    let remExecResp = try await runner.call(ModelCallRequest(
+                        provider: executor.provider,
+                        modelID: executor.modelID,
+                        effort: executor.effort,
+                        systemPrompt: DebatePrompts.completenessRemediationExecutionPrompt(
+                            executor: executor,
+                            moderatorName: moderator.name,
+                            reviewerName: reviewer.name,
+                            assignment: remTask,
+                            workspacePath: targetFolder
+                        ),
+                        userPrompt: buildTranscriptContext(for: session),
+                        allowWebSearch: session.allowWebSearch,
+                        toolPhase: .coordinatedReadWrite,
+                        workspacePath: targetFolder,
+                        openRouterAPIKey: openRouterKey
+                    ))
+
+                    var remExecTurn = parseDebateTurn(
+                        raw: remExecResp.rawText,
+                        durationMs: remExecResp.durationMs,
+                        roundNumber: 110 + passIndex,
+                        roundLabel: "Remediation \(passIndex) · \(rIdx + 1)/\(remAssignments.count)",
+                        persona: executor,
+                        modelLabel: modelLabels[executor.modelID] ?? executor.modelID,
+                        defaultStance: .executing
+                    )
+
+                    if let remExecJSON = JSONExtractor.parseObject(remExecResp.rawText) {
+                        if let updatedFiles = (remExecJSON["files_summary"] as? [String])?.filter({ !$0.isEmpty }) {
+                            for f in updatedFiles where !filesSummary.contains(f) {
+                                filesSummary.append(f)
+                            }
+                        }
+                        if let updatedRun = (remExecJSON["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !updatedRun.isEmpty {
+                            howToRun = updatedRun
+                        }
+                        if let blockers = (remExecJSON["unresolvable_reasons"] as? [String])?
+                            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                            .filter({ !$0.isEmpty }),
+                           !blockers.isEmpty {
+                            for b in blockers {
+                                remExecTurn.keyPoints.append("TEAM BLOCKER REASON: \(b)")
+                            }
+                        }
+                    }
+
+                    session.entries.append(.turn(remExecTurn))
+                    session.updatedAt = Date()
+                    await onEvent(.sessionUpdated(session))
+                    await onEvent(.enqueueSpeech(SpeechQueueItem(
+                        id: remExecTurn.id,
+                        persona: executor,
+                        spokenText: remExecTurn.spokenTake,
+                        contextLabel: "Remediated · \(executor.name)"
+                    )))
+                }
+            }
+        }
+
         verdict.wasExecuted = true
         verdict.buildReport = BuildReport(
             buildFolder: targetFolder,
@@ -550,7 +826,11 @@ public final class DebateOrchestrator: Sendable {
             verifierName: verifier.name,
             verificationSummary: ExpressiveCleaner.stripCues(verificationSummary),
             filesSummary: filesSummary,
-            howToRun: howToRun
+            howToRun: howToRun,
+            completenessReviewerName: finalCompletenessReviewerName,
+            completenessPercent: finalCompletenessPercent,
+            completenessIterations: finalCompletenessPasses,
+            acceptedBlockers: finalAcceptedBlockers
         )
         if let updatedIdx = session.entries.firstIndex(where: {
             if case .verdict(let v) = $0 { return v.id == verdictID }
@@ -565,12 +845,13 @@ public final class DebateOrchestrator: Sendable {
         return session
     }
 
-    // MARK: - Collaborative Build Mode Pipeline (Huddle -> Blueprint -> Build -> QA Gate)
+    // MARK: - Collaborative Build Mode Pipeline (Huddle -> Blueprint -> Build -> QA Gate -> Completeness Loop)
 
     private func runBuildSessionToCompletion(
         session initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
+        allPersonas: [Persona],
         modelLabels: [String: String],
         openRouterKey: String?,
         isIncrementalFollowUp: Bool,
@@ -666,12 +947,13 @@ public final class DebateOrchestrator: Sendable {
             contextLabel: "Build Blueprint · \(moderator.name)"
         )))
 
-        // Phase 3 + 4 + 5: Execute Workstreams -> Adversarial QA Verification -> Auto-Fix Pass
+        // Phase 3 + 4 + 5: Execute Workstreams -> Adversarial QA Verification -> Completeness Audit Loop
         return try await executeVerdictPlan(
             verdictID: blueprint.id,
             into: session,
             moderator: moderator,
             debaters: debaters,
+            allPersonas: allPersonas,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             onEvent: onEvent
@@ -775,6 +1057,21 @@ public final class DebateOrchestrator: Sendable {
         return candidates.first ?? fallback
     }
 
+    private func resolveCompletenessReviewer(
+        for session: DebateSession,
+        moderator: Persona,
+        debaters: [Persona],
+        allPersonas: [Persona]
+    ) -> Persona {
+        let targetID = session.effectiveCompletenessReviewerID
+        let pool = allPersonas + [moderator] + debaters + DefaultRoster.personas
+        if let hit = pool.first(where: { $0.id == targetID }) {
+            return hit
+        }
+        return DefaultRoster.personas.first(where: { $0.id == DefaultRoster.wardenID })
+            ?? selectVerifier(from: debaters, fallback: moderator)
+    }
+
     /// Synthesizes a tailored coding-harness handoff prompt using the Chair when the user wants custom AI synthesis/filtering.
     public func synthesizeTailoredHandoffPrompt(
         session: DebateSession,
@@ -812,6 +1109,7 @@ public final class DebateOrchestrator: Sendable {
         session initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
+        allPersonas: [Persona],
         modelLabels: [String: String],
         openRouterKey: String?,
         isFollowUpRound: Bool,
@@ -1166,6 +1464,7 @@ public final class DebateOrchestrator: Sendable {
                 into: session,
                 moderator: moderator,
                 debaters: debaters,
+                allPersonas: allPersonas,
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
                 onEvent: onEvent
@@ -1559,7 +1858,17 @@ public final class DebateOrchestrator: Sendable {
                 }
                 sections.append(block)
             case .verdict(let v):
-                sections.append("CO-SIGNED VERDICT (\(v.headline)):\n\(v.recommendation)")
+                var vBlock = "CO-SIGNED VERDICT (\(v.headline)):\n\(v.recommendation)"
+                if !v.actionSteps.isEmpty {
+                    vBlock += "\nAction Steps:\n" + v.actionSteps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+                }
+                if let assignments = v.executionAssignments, !assignments.isEmpty {
+                    vBlock += "\nExecution Workstreams:\n" + assignments.enumerated().map { idx, a in
+                        let scope = a.targetScope.isEmpty ? "" : " [Scope: \(a.targetScope)]"
+                        return "\(idx + 1). \(a.assignedPersonaName): \(a.taskInstruction)\(scope)"
+                    }.joined(separator: "\n")
+                }
+                sections.append(vBlock)
             case .systemNote:
                 break
             }

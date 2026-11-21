@@ -57,6 +57,8 @@ public struct AppPreferences: Codable, Sendable {
     public var defaultAllowWebSearch: Bool
     public var defaultMode: CouncilMode?
     public var defaultCLIToolsEnabled: Bool?
+    public var defaultCompletenessReviewEnabled: Bool?
+    public var defaultCompletenessReviewerID: UUID?
     public var defaultWorkspacePath: String?
     public var recentWorkspacePaths: [String]?
     public var showVocalTagsInText: Bool
@@ -69,6 +71,8 @@ public struct AppPreferences: Codable, Sendable {
         defaultAllowWebSearch: Bool = true,
         defaultMode: CouncilMode? = .debate,
         defaultCLIToolsEnabled: Bool? = true,
+        defaultCompletenessReviewEnabled: Bool? = true,
+        defaultCompletenessReviewerID: UUID? = DefaultRoster.wardenID,
         defaultWorkspacePath: String? = WorkspaceResolver.defaultWorkspacePath(),
         recentWorkspacePaths: [String]? = nil,
         showVocalTagsInText: Bool = true,
@@ -80,6 +84,8 @@ public struct AppPreferences: Codable, Sendable {
         self.defaultAllowWebSearch = defaultAllowWebSearch
         self.defaultMode = defaultMode
         self.defaultCLIToolsEnabled = defaultCLIToolsEnabled
+        self.defaultCompletenessReviewEnabled = defaultCompletenessReviewEnabled
+        self.defaultCompletenessReviewerID = defaultCompletenessReviewerID
         self.defaultWorkspacePath = defaultWorkspacePath
         self.recentWorkspacePaths = recentWorkspacePaths
         self.showVocalTagsInText = showVocalTagsInText

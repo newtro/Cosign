@@ -458,6 +458,47 @@ private struct SessionCompletedFinaleCard: View {
                     .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: true))
                 }
 
+                if let reviewerName = report.completenessReviewerName {
+                    let pct = report.completenessPercent ?? 100
+                    let passes = report.completenessIterations ?? 1
+                    HStack(spacing: 7) {
+                        Image(systemName: pct >= 100 ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundStyle(pct >= 100 ? StudioTheme.emerald : StudioTheme.brassBright)
+                        Text("\(pct)% COMPLETENESS AUDITED & SIGNED OFF BY \(reviewerName.uppercased()) (\(passes) PASS\(passes == 1 ? "" : "ES"))")
+                            .font(.system(size: 10.5, weight: .heavy, design: .rounded))
+                            .tracking(0.7)
+                            .foregroundStyle(pct >= 100 ? StudioTheme.emerald : StudioTheme.brassBright)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5.5)
+                    .background(Capsule().fill((pct >= 100 ? StudioTheme.emerald : StudioTheme.brassBright).opacity(0.13)))
+                }
+
+                if let blockers = report.acceptedBlockers, !blockers.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("VERIFIED EXTERNAL BLOCKERS")
+                            .font(.system(size: 9.5, weight: .heavy, design: .rounded))
+                            .tracking(0.8)
+                            .foregroundStyle(StudioTheme.brassBright)
+                        ForEach(blockers, id: \.self) { blocker in
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: "info.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(StudioTheme.brassBright)
+                                    .padding(.top, 2.5)
+                                Text(blocker)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(StudioTheme.inkSecondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(StudioTheme.brass.opacity(0.08)))
+                }
+
                 if !report.verificationSummary.isEmpty {
                     Text(report.verificationSummary)
                         .font(.system(size: 13.5))
