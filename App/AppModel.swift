@@ -30,6 +30,7 @@ final class AppModel: ObservableObject {
     @Published var studioInitialPersonaID: UUID?
     @Published var showingLineupPopover: Bool = false
     @Published var activeHandoffVerdict: CosignVerdict?
+    @Published var activeBuildLaunchVerdict: CosignVerdict?
 
     let store: SessionStore
     let voiceEngine: VoiceEngine
@@ -224,6 +225,17 @@ final class AppModel: ObservableObject {
         updateSessionInPlace(session)
     }
 
+    func setCurrentSessionMode(_ mode: CouncilMode) {
+        preferences.defaultMode = mode
+        store.savePreferences(preferences)
+        guard var session = currentSession, !session.stage.isBusy else { return }
+        session.mode = mode
+        if mode == .build {
+            session.cliToolsEnabled = true
+        }
+        updateSessionInPlace(session)
+    }
+
     func setCurrentSessionCLITools(_ enabled: Bool) {
         preferences.defaultCLIToolsEnabled = enabled
         store.savePreferences(preferences)
@@ -232,7 +244,7 @@ final class AppModel: ObservableObject {
         updateSessionInPlace(session)
     }
 
-    func setCurrentSessionWorkspace(_ path: String) {
+    func setCurrentSessionWorkspace(_ path: String, explicitBuildSelection: Bool = false) {
         preferences.defaultWorkspacePath = path
         var recents = preferences.recentWorkspacePaths ?? []
         recents.removeAll { $0 == path }
@@ -242,20 +254,38 @@ final class AppModel: ObservableObject {
 
         guard var session = currentSession else { return }
         session.workspacePath = path
+        if explicitBuildSelection || !WorkspaceResolver.isParentReposContainer(path) {
+            session.hasExplicitBuildFolder = true
+        }
         updateSessionInPlace(session)
     }
 
-    func chooseWorkspaceFolderWithPanel() {
+    @discardableResult
+    func chooseWorkspaceFolderWithPanel(forBuild: Bool = false) -> String? {
         let panel = NSOpenPanel()
-        panel.title = "Choose Workspace or Repository Folder"
+        panel.title = forBuild ? "Select or Create Project Build Folder" : "Choose Workspace or Repository Folder"
+        panel.message = forBuild
+            ? "Pick an existing project folder or click 'New Folder' to create a fresh directory for the council to build in."
+            : "Choose a local repository or workspace folder for CLI inspection."
+        panel.prompt = forBuild ? "Select Build Folder" : "Select Folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         if let current = currentSession?.workspacePath {
             panel.directoryURL = URL(fileURLWithPath: current)
         }
         if panel.runModal() == .OK, let url = panel.url {
-            setCurrentSessionWorkspace(url.path)
+            setCurrentSessionWorkspace(url.path, explicitBuildSelection: true)
+            return url.path
+        }
+        return nil
+    }
+
+    func openFolderInFinder(_ path: String) {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
         }
     }
 
@@ -298,7 +328,19 @@ final class AppModel: ObservableObject {
 
     func sendPrompt(_ text: String, skipInterview: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let session = currentSession, !session.stage.isBusy else { return }
+        guard !trimmed.isEmpty, var session = currentSession, !session.stage.isBusy else { return }
+
+        // In Build Mode, if no dedicated project folder was picked yet (still pointing at parent repos root),
+        // prompt the user right now so they can pick a project directory or click 'New Folder' to create one!
+        if session.activeMode == .build
+            && session.hasExplicitBuildFolder != true
+            && WorkspaceResolver.isParentReposContainer(session.workspacePath) {
+            guard chooseWorkspaceFolderWithPanel(forBuild: true) != nil,
+                  let refreshed = currentSession else {
+                return
+            }
+            session = refreshed
+        }
 
         lastErrorBanner = nil
         voiceEngine.stopAll()
@@ -420,8 +462,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func executeVerdict(_ verdict: CosignVerdict) {
-        guard let session = currentSession, !session.stage.isBusy else { return }
+    func openBuildLaunchSheet(for verdict: CosignVerdict) {
+        activeBuildLaunchVerdict = verdict
+    }
+
+    func startBuildFromVerdict(_ verdict: CosignVerdict, targetFolder: String, extraNote: String = "") {
+        guard currentSession != nil else { return }
+        setCurrentSessionWorkspace(targetFolder, explicitBuildSelection: true)
+        guard var session = currentSession, !session.stage.isBusy else { return }
+        session.mode = .build
+        session.cliToolsEnabled = true
+        session.workspacePath = targetFolder
+        session.hasExplicitBuildFolder = true
+        updateSessionInPlace(session)
+
         lastErrorBanner = nil
         voiceEngine.stopAll()
 
@@ -436,6 +490,7 @@ final class AppModel: ObservableObject {
             do {
                 let finalSession = try await self.orchestrator.executeVerdictPlan(
                     verdictID: verdict.id,
+                    extraInstruction: extraNote,
                     into: session,
                     moderator: moderator,
                     debaters: debaters,
@@ -458,6 +513,10 @@ final class AppModel: ObservableObject {
                 self.recordError(error.localizedDescription, on: session.id)
             }
         }
+    }
+
+    func executeVerdict(_ verdict: CosignVerdict) {
+        openBuildLaunchSheet(for: verdict)
     }
 
     func openHandoffSheet(for verdict: CosignVerdict? = nil) {
@@ -611,7 +670,7 @@ final class AppModel: ObservableObject {
     }
 
     func previewPersonaVoice(_ persona: Persona) {
-        let sample = "[chuckle] Hi, I'm \(persona.name), \(persona.title). Bring me your sharpest half-baked idea and let's put it to the test."
+        let sample = "(laugh) Hi, I'm \(persona.name), \(persona.title). Bring me your sharpest idea or project folder and let's get to work."
         voiceEngine.isMuted = false
         voiceEngine.speakImmediately(SpeechQueueItem(
             id: UUID(),
@@ -689,6 +748,7 @@ final class AppModel: ObservableObject {
             debaterIDs: debIDs,
             maxRebuttalRounds: prefs.defaultMaxRebuttalRounds,
             allowWebSearch: prefs.defaultAllowWebSearch,
+            mode: prefs.defaultMode ?? .debate,
             cliToolsEnabled: prefs.defaultCLIToolsEnabled ?? true,
             workspacePath: prefs.defaultWorkspacePath ?? WorkspaceResolver.defaultWorkspacePath()
         )

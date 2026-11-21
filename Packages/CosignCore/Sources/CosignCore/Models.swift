@@ -254,6 +254,34 @@ public enum ToolExecutionPhase: String, Codable, Sendable {
     case coordinatedReadWrite
 }
 
+public enum CouncilMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case debate
+    case build
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .debate: return "Debate Mode"
+        case .build: return "Build Mode"
+        }
+    }
+
+    public var shortLabel: String {
+        switch self {
+        case .debate: return "Debate"
+        case .build: return "Build"
+        }
+    }
+
+    public var symbolName: String {
+        switch self {
+        case .debate: return "bubble.left.and.exclamationmark.bubble.right.fill"
+        case .build: return "hammer.fill"
+        }
+    }
+}
+
 public enum StanceKind: String, Codable, CaseIterable, Sendable {
     case intake
     case opening
@@ -266,6 +294,7 @@ public enum StanceKind: String, Codable, CaseIterable, Sendable {
     case cosigning
     case dissenting
     case executing
+    case verifying
     case followup
 
     public var label: String {
@@ -280,7 +309,8 @@ public enum StanceKind: String, Codable, CaseIterable, Sendable {
         case .synthesizing: return "Synthesizing"
         case .cosigning: return "Co-Signing"
         case .dissenting: return "Holding Dissent"
-        case .executing: return "Coordinated Edit"
+        case .executing: return "Building Code"
+        case .verifying: return "QA & Verification"
         case .followup: return "Follow-Up"
         }
     }
@@ -298,6 +328,7 @@ public enum StanceKind: String, Codable, CaseIterable, Sendable {
         case .cosigning: return "checkmark.seal.fill"
         case .dissenting: return "exclamationmark.triangle.fill"
         case .executing: return "hammer.circle.fill"
+        case .verifying: return "checkmark.shield.fill"
         case .followup: return "bubble.left.and.bubble.right.fill"
         }
     }
@@ -484,6 +515,34 @@ public struct ExecutionAssignment: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+public struct BuildReport: Codable, Hashable, Sendable {
+    public var buildFolder: String
+    public var verificationPassed: Bool
+    public var verifierName: String
+    public var verificationSummary: String
+    public var filesSummary: [String]
+    public var howToRun: String
+    public var completedAt: Date
+
+    public init(
+        buildFolder: String,
+        verificationPassed: Bool,
+        verifierName: String,
+        verificationSummary: String,
+        filesSummary: [String] = [],
+        howToRun: String = "",
+        completedAt: Date = Date()
+    ) {
+        self.buildFolder = buildFolder
+        self.verificationPassed = verificationPassed
+        self.verifierName = verifierName
+        self.verificationSummary = verificationSummary
+        self.filesSummary = filesSummary
+        self.howToRun = howToRun
+        self.completedAt = completedAt
+    }
+}
+
 public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var moderatorID: UUID
@@ -500,6 +559,7 @@ public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
     public var shouldAutoExecute: Bool?
     public var executionAssignments: [ExecutionAssignment]?
     public var wasExecuted: Bool?
+    public var buildReport: BuildReport?
     public var createdAt: Date
 
     public init(
@@ -518,6 +578,7 @@ public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
         shouldAutoExecute: Bool? = false,
         executionAssignments: [ExecutionAssignment]? = nil,
         wasExecuted: Bool? = false,
+        buildReport: BuildReport? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -535,6 +596,7 @@ public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
         self.shouldAutoExecute = shouldAutoExecute
         self.executionAssignments = executionAssignments
         self.wasExecuted = wasExecuted
+        self.buildReport = buildReport
         self.createdAt = createdAt
     }
 
@@ -628,7 +690,7 @@ public enum HandoffPromptBuilder {
         // Core Co-Signed Direction
         out.append("## Agreed Architecture & Strategy")
         let cleanBottomLine = verdict.spokenVerdict
-            .replacingOccurrences(of: #"\[(chuckle|laugh|sigh|clear throat|cough|gasp|groan)\]"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[\[\(](chuckle|laugh|sigh|clears? throat|cough|gasp|groan)[\]\)]"#, with: "", options: [.regularExpression, .caseInsensitive])
             .replacingOccurrences(of: "  ", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanBottomLine.isEmpty {
@@ -677,7 +739,8 @@ public enum HandoffPromptBuilder {
                     followUps.append("- **User Follow-Up:** \(msg.text)")
                 case .turn(let t):
                     let clean = t.spokenTake
-                        .replacingOccurrences(of: #"\[(chuckle|laugh|sigh|clear throat|cough|gasp|groan)\]"#, with: "", options: .regularExpression)
+                        .replacingOccurrences(of: #"[\[\(](chuckle|laugh|sigh|clears? throat|cough|gasp|groan)[\]\)]"#, with: "", options: [.regularExpression, .caseInsensitive])
+                        .replacingOccurrences(of: "  ", with: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     followUps.append("- **\(t.personaName) (\(t.personaTitle)):** \(clean)")
                 default:
@@ -772,13 +835,14 @@ public enum SessionStage: String, Codable, Sendable {
     case debating
     case synthesizingVerdict
     case executingPlan
+    case verifyingBuild
     case completed
     case cancelled
     case error
 
     public var isBusy: Bool {
         switch self {
-        case .scanningIntake, .debating, .synthesizingVerdict, .executingPlan:
+        case .scanningIntake, .debating, .synthesizingVerdict, .executingPlan, .verifyingBuild:
             return true
         default:
             return false
@@ -795,6 +859,10 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
     public var debaterIDs: [UUID]
     public var maxRebuttalRounds: Int
     public var allowWebSearch: Bool
+    /// Session workflow mode (`debate` vs `build`). Nil on legacy v1.0.x sessions defaults to `.debate`.
+    public var mode: CouncilMode?
+    /// True once the user explicitly selected or created a project build folder for this session.
+    public var hasExplicitBuildFolder: Bool?
     /// When true (default), personas have full CLI tools (repo/disk read, git, gh, MCP, web) and Chair-coordinated writes.
     public var cliToolsEnabled: Bool?
     /// Active working directory for CLI tools (e.g. a specific repo or repos parent folder).
@@ -802,8 +870,13 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
     public var stage: SessionStage
     public var entries: [TimelineEntry]
 
+    public var activeMode: CouncilMode {
+        mode ?? .debate
+    }
+
     public var hasFullCLITools: Bool {
-        cliToolsEnabled ?? true
+        if activeMode == .build { return true }
+        return cliToolsEnabled ?? true
     }
 
     public init(
@@ -815,6 +888,8 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
         debaterIDs: [UUID],
         maxRebuttalRounds: Int = 2,
         allowWebSearch: Bool = true,
+        mode: CouncilMode? = .debate,
+        hasExplicitBuildFolder: Bool? = nil,
         cliToolsEnabled: Bool? = true,
         workspacePath: String? = nil,
         stage: SessionStage = .idle,
@@ -828,6 +903,8 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
         self.debaterIDs = debaterIDs
         self.maxRebuttalRounds = maxRebuttalRounds
         self.allowWebSearch = allowWebSearch
+        self.mode = mode
+        self.hasExplicitBuildFolder = hasExplicitBuildFolder
         self.cliToolsEnabled = cliToolsEnabled
         self.workspacePath = workspacePath
         self.stage = stage

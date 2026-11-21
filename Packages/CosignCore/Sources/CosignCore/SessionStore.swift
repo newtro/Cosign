@@ -31,6 +31,23 @@ public enum WorkspaceResolver {
             return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
         }
     }
+
+    /// Returns true when `path` is nil or points to a top-level parent container (`repos`, `Developer`, `$HOME`)
+    /// rather than a dedicated project directory—used to prompt the user to select or create a folder before Building.
+    public static func isParentReposContainer(_ path: String?, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        guard let path, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return true
+        }
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        let parentRoots: Set<String> = [
+            "/Volumes/Cache/repos",
+            "/Volumes/Data 1/Repos",
+            home.appendingPathComponent("repos").standardizedFileURL.path,
+            home.appendingPathComponent("Developer").standardizedFileURL.path,
+            home.standardizedFileURL.path,
+        ]
+        return parentRoots.contains(standardized)
+    }
 }
 
 public struct AppPreferences: Codable, Sendable {
@@ -38,6 +55,7 @@ public struct AppPreferences: Codable, Sendable {
     public var playbackSpeed: Double
     public var defaultMaxRebuttalRounds: Int
     public var defaultAllowWebSearch: Bool
+    public var defaultMode: CouncilMode?
     public var defaultCLIToolsEnabled: Bool?
     public var defaultWorkspacePath: String?
     public var recentWorkspacePaths: [String]?
@@ -49,6 +67,7 @@ public struct AppPreferences: Codable, Sendable {
         playbackSpeed: Double = 1.08,
         defaultMaxRebuttalRounds: Int = 2,
         defaultAllowWebSearch: Bool = true,
+        defaultMode: CouncilMode? = .debate,
         defaultCLIToolsEnabled: Bool? = true,
         defaultWorkspacePath: String? = WorkspaceResolver.defaultWorkspacePath(),
         recentWorkspacePaths: [String]? = nil,
@@ -59,6 +78,7 @@ public struct AppPreferences: Codable, Sendable {
         self.playbackSpeed = playbackSpeed
         self.defaultMaxRebuttalRounds = defaultMaxRebuttalRounds
         self.defaultAllowWebSearch = defaultAllowWebSearch
+        self.defaultMode = defaultMode
         self.defaultCLIToolsEnabled = defaultCLIToolsEnabled
         self.defaultWorkspacePath = defaultWorkspacePath
         self.recentWorkspacePaths = recentWorkspacePaths

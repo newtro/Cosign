@@ -31,7 +31,8 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     @Published public private(set) var speakerLevel: CGFloat = 0
 
     private let cacheDirectory: URL
-    private lazy var daemonClient: ChatterboxDaemonClient = ChatterboxDaemonClient { [weak self] newState in
+    private let breezeRefsDirectory: URL
+    private lazy var daemonClient: ChatterboxDaemonClient = ChatterboxDaemonClient(refsDirectory: breezeRefsDirectory) { [weak self] newState in
         Task { @MainActor in
             self?.daemonState = newState
         }
@@ -48,13 +49,15 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
 
     public init(cacheRoot: URL = SessionStore.defaultRootDirectory()) {
         self.cacheDirectory = cacheRoot.appendingPathComponent("AudioCache", isDirectory: true)
+        self.breezeRefsDirectory = cacheRoot.appendingPathComponent("BreezeRefs", isDirectory: true)
         super.init()
         try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: breezeRefsDirectory, withIntermediateDirectories: true)
     }
 
     public func warmUpIfNeeded() {
         if case .idle = daemonState {
-            daemonState = .starting("Starting Chatterbox Turbo (Metal)…")
+            daemonState = .starting("Starting Breeze TTS 2 (Metal)…")
         }
         let client = daemonClient
         Task {
@@ -167,11 +170,13 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
            ((try? FileManager.default.attributesOfItem(atPath: cachedURL.path)[.size] as? Int) ?? 0) > 1024 {
             return cachedURL
         }
-        let seedPath = resolveReferenceAudioPath(for: item.persona)
+        let normalizedText = ExpressiveTagFormatter.normalizeForBreeze(item.spokenText)
+        let customPath = (item.persona.customVoicePath?.isEmpty == false) ? item.persona.customVoicePath : nil
         let client = daemonClient
         let ok = await client.synthesize(
-            text: item.spokenText,
-            refAudioPath: seedPath,
+            text: normalizedText,
+            presetID: item.persona.voicePresetID,
+            customVoicePath: customPath,
             exaggeration: item.persona.voiceExaggeration,
             outputURL: cachedURL
         )
@@ -319,16 +324,18 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     private func cachedAudioURL(for item: SpeechQueueItem) -> URL {
-        let keyString = "\(item.persona.voicePresetID)|\(item.persona.customVoicePath ?? "")|\(String(format: "%.2f", item.persona.voiceExaggeration))|\(item.spokenText)"
+        let normalized = ExpressiveTagFormatter.normalizeForBreeze(item.spokenText)
+        let keyString = "breeze2-v1|\(item.persona.voicePresetID)|\(item.persona.customVoicePath ?? "")|\(String(format: "%.2f", item.persona.voiceExaggeration))|\(normalized)"
         let digest = SHA256.hash(data: Data(keyString.utf8))
         let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
-        return cacheDirectory.appendingPathComponent("turn-\(hex).wav")
+        return cacheDirectory.appendingPathComponent("breeze-\(hex).wav")
     }
 }
 
-// MARK: - Background Actor Managing Python MLX Daemon (Zero Pipe Deadlock + Auto-Recovery)
+// MARK: - Background Actor Managing Python MLX Breeze TTS 2 Daemon (Zero Pipe Deadlock + Auto-Recovery)
 
 actor ChatterboxDaemonClient {
+    private let refsDirectory: URL
     private let onStateChange: @Sendable (VoiceDaemonState) -> Void
     private var process: Process?
     private var stdinHandle: FileHandle?
@@ -337,7 +344,8 @@ actor ChatterboxDaemonClient {
     private var readyWaiters: [CheckedContinuation<Bool, Never>] = []
     private var missingRuntimePermanently: Bool = false
 
-    init(onStateChange: @escaping @Sendable (VoiceDaemonState) -> Void) {
+    init(refsDirectory: URL, onStateChange: @escaping @Sendable (VoiceDaemonState) -> Void) {
+        self.refsDirectory = refsDirectory
         self.onStateChange = onStateChange
     }
 
@@ -354,22 +362,21 @@ actor ChatterboxDaemonClient {
 
         guard let uvBinary = BinaryLocator.findBinary("uv") else {
             missingRuntimePermanently = true
-            onStateChange(.fallbackSystemVoice("Install `uv` to enable Chatterbox Turbo MLX"))
+            onStateChange(.fallbackSystemVoice("Install `uv` to enable Breeze TTS 2 MLX"))
             resumeReadyWaiters(false)
             return
         }
 
-        onStateChange(.starting("Warming up Chatterbox Turbo (Metal)…"))
+        onStateChange(.starting("Warming up Breeze TTS 2 (Metal)…"))
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: uvBinary)
         proc.arguments = [
             "run",
             "--python", "3.12",
-            "--with", "mlx-audio",
+            "--with", "mlx-audio>=0.6.0",
             "--with", "soundfile",
-            "--with", "tiktoken",
-            "--with", "librosa",
+            "--with", "numpy",
             "python",
             scriptURL.path
         ]
@@ -378,6 +385,7 @@ actor ChatterboxDaemonClient {
         env["PYTHONUNBUFFERED"] = "1"
         env["TQDM_DISABLE"] = "1"
         env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        env["COSIGN_BREEZE_REFS_DIR"] = refsDirectory.path
         proc.environment = env
 
         let inPipe = Pipe()
@@ -450,10 +458,10 @@ actor ChatterboxDaemonClient {
         isReady = false
     }
 
-    func synthesize(text: String, refAudioPath: String?, exaggeration: Double, outputURL: URL) async -> Bool {
+    func synthesize(text: String, presetID: String, customVoicePath: String?, exaggeration: Double, outputURL: URL) async -> Bool {
         if missingRuntimePermanently { return false }
         for attempt in 0..<2 {
-            if await synthesizeSingleAttempt(text: text, refAudioPath: refAudioPath, exaggeration: exaggeration, outputURL: outputURL) {
+            if await synthesizeSingleAttempt(text: text, presetID: presetID, customVoicePath: customVoicePath, exaggeration: exaggeration, outputURL: outputURL) {
                 return true
             }
             if attempt == 0 {
@@ -464,7 +472,7 @@ actor ChatterboxDaemonClient {
         return false
     }
 
-    private func synthesizeSingleAttempt(text: String, refAudioPath: String?, exaggeration: Double, outputURL: URL) async -> Bool {
+    private func synthesizeSingleAttempt(text: String, presetID: String, customVoicePath: String?, exaggeration: Double, outputURL: URL) async -> Bool {
         if !isReady || process?.isRunning != true {
             await start()
             let becameReady = await waitForReady()
@@ -477,11 +485,12 @@ actor ChatterboxDaemonClient {
             "id": reqID,
             "cmd": "synthesize",
             "text": text,
+            "preset_id": presetID,
             "exaggeration": exaggeration,
             "out_path": outputURL.path
         ]
-        if let refAudioPath {
-            payload["ref_audio"] = refAudioPath
+        if let customVoicePath {
+            payload["custom_voice"] = customVoicePath
         }
         guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
               var lineData = String(data: jsonData, encoding: .utf8)?.data(using: .utf8) else {
@@ -532,7 +541,7 @@ actor ChatterboxDaemonClient {
             } else if state == "starting" {
                 onStateChange(.starting(msg))
             } else if state == "error" {
-                onStateChange(.fallbackSystemVoice("Chatterbox reload needed"))
+                onStateChange(.fallbackSystemVoice("Breeze TTS 2 reload needed"))
                 resumeReadyWaiters(false)
             }
         } else if event == "done" {

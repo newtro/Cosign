@@ -148,6 +148,11 @@ struct CosignRootView: View {
                 HandoffPromptSheet(model: model, session: session, verdict: verdict)
             }
         }
+        .sheet(item: $model.activeBuildLaunchVerdict) { verdict in
+            if let session = model.currentSession {
+                BuildLaunchSheet(model: model, session: session, verdict: verdict)
+            }
+        }
     }
 
     @ViewBuilder

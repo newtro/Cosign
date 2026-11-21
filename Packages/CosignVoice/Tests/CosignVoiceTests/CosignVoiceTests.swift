@@ -15,6 +15,17 @@ final class CosignVoiceTests: XCTestCase {
 
         let stripped = ExpressiveTagFormatter.stripTags(input)
         XCTAssertEqual(stripped, "Hold on Marcus, that won't survive contact with reality. Ask me how I know.")
+
+        let normalized = ExpressiveTagFormatter.normalizeForBreeze("[chuckle] Wait—[clear throat] let's check `(sigh)`")
+        XCTAssertTrue(normalized.contains("(laugh)"))
+        XCTAssertTrue(normalized.contains("(clears throat)"))
+        XCTAssertTrue(normalized.contains("(sigh)"))
+
+        let breezeSegments = ExpressiveTagFormatter.parseSegments("(laugh) That built cleanly on the first pass.")
+        XCTAssertEqual(breezeSegments, [
+            .cue("laughs"),
+            .words(" That built cleanly on the first pass.")
+        ])
     }
 
     @MainActor

@@ -496,10 +496,10 @@ struct PersonaStudioSheet: View {
                         .padding(15)
                         .studioCard(cornerRadius: 14, fill: StudioTheme.cardSurface)
 
-                        // Expressive Local Voice Studio (Chatterbox Turbo)
+                        // Expressive Local Voice Studio (Breeze TTS 2)
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
-                                studioLabel("CHATTERBOX TURBO EXPRESSIVE VOICE")
+                                studioLabel("BREEZE TTS 2 STUDIO VOICE")
                                 Spacer()
                                 Button {
                                     model.previewPersonaVoice(draft)
@@ -799,18 +799,27 @@ struct CosignSettingsView: View {
 
     private var voiceAndDisplayTab: some View {
         Form {
-            Toggle("Automatically speak panel responses aloud (Chatterbox Turbo MLX)", isOn: Binding(
+            Toggle("Automatically speak panel responses aloud (Breeze TTS 2 MLX)", isOn: Binding(
                 get: { model.preferences.autoSpeakResponses },
                 set: { _ in model.toggleAutoSpeak() }
             ))
 
-            Toggle("Display subtle vocal stage cues (e.g. chuckles, sighs) in turn cards", isOn: Binding(
+            Toggle("Display subtle vocal stage cues (e.g. laughs, sighs) in turn cards", isOn: Binding(
                 get: { model.preferences.showVocalTagsInText },
                 set: { newVal in
                     model.preferences.showVocalTagsInText = newVal
                     model.store.savePreferences(model.preferences)
                 }
             ))
+
+            Picker("Default Session Mode", selection: Binding(
+                get: { model.preferences.defaultMode ?? .debate },
+                set: { model.setCurrentSessionMode($0) }
+            )) {
+                ForEach(CouncilMode.allCases) { m in
+                    Text(m.displayName).tag(m)
+                }
+            }
 
             Picker("Default Rebuttal Rounds", selection: Binding(
                 get: { model.preferences.defaultMaxRebuttalRounds },

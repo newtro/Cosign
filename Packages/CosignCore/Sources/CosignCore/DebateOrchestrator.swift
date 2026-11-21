@@ -80,16 +80,23 @@ public final class DebateOrchestrator: Sendable {
             ))
 
             let intakePrompt = buildTranscriptContext(for: session)
-            let resp = try await runner.call(ModelCallRequest(
-                provider: moderator.provider,
-                modelID: moderator.modelID,
-                effort: moderator.effort,
-                systemPrompt: DebatePrompts.intakeSystemPrompt(
+            let intakeSysPrompt = session.activeMode == .build
+                ? DebatePrompts.buildIntakeSystemPrompt(
+                    moderator: moderator,
+                    debaters: debaters,
+                    workspacePath: session.workspacePath
+                )
+                : DebatePrompts.intakeSystemPrompt(
                     moderator: moderator,
                     debaters: debaters,
                     workspacePath: session.workspacePath,
                     toolsEnabled: session.hasFullCLITools
-                ),
+                )
+            let resp = try await runner.call(ModelCallRequest(
+                provider: moderator.provider,
+                modelID: moderator.modelID,
+                effort: moderator.effort,
+                systemPrompt: intakeSysPrompt,
                 userPrompt: intakePrompt,
                 allowWebSearch: session.allowWebSearch,
                 toolPhase: researchPhase(for: session),
@@ -155,6 +162,18 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
+        if session.activeMode == .build {
+            return try await runBuildSessionToCompletion(
+                session: session,
+                moderator: moderator,
+                debaters: debaters,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                isIncrementalFollowUp: hadPriorVerdict,
+                onEvent: onEvent
+            )
+        }
+
         return try await runDebateToVerdict(
             session: session,
             moderator: moderator,
@@ -189,6 +208,18 @@ public final class DebateOrchestrator: Sendable {
         }
         session.updatedAt = Date()
         await onEvent(.sessionUpdated(session))
+
+        if session.activeMode == .build {
+            return try await runBuildSessionToCompletion(
+                session: session,
+                moderator: moderator,
+                debaters: debaters,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                isIncrementalFollowUp: false,
+                onEvent: onEvent
+            )
+        }
 
         return try await runDebateToVerdict(
             session: session,
@@ -230,6 +261,17 @@ public final class DebateOrchestrator: Sendable {
             if case .verdict = $0 { return true }
             return false
         }
+        if session.activeMode == .build {
+            return try await runBuildSessionToCompletion(
+                session: session,
+                moderator: moderator,
+                debaters: debaters,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                isIncrementalFollowUp: hadPriorVerdict,
+                onEvent: onEvent
+            )
+        }
         return try await runDebateToVerdict(
             session: session,
             moderator: moderator,
@@ -241,9 +283,11 @@ public final class DebateOrchestrator: Sendable {
         )
     }
 
-    /// Runs Chair-coordinated sequential write execution for a Co-Signed Verdict (either automatically or when the user clicks "Execute Plan").
+    /// Runs Chair-coordinated sequential build execution + Adversarial QA Verification Gate + Auto-Fix Pass
+    /// inside `session.workspacePath` (either from Build Mode or when clicking "Build This Plan…" on a Debate Verdict).
     public func executeVerdictPlan(
         verdictID: UUID,
+        extraInstruction: String = "",
         into initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
@@ -259,29 +303,72 @@ public final class DebateOrchestrator: Sendable {
             return session
         }
 
-        session.stage = .executingPlan
-        session.entries.append(.roundBanner(RoundBanner(
-            roundNumber: 99,
-            title: "Chair-Coordinated Execution",
-            subtitle: "\(moderator.name) is coordinating sequential edits — one persona holds the write lock at a time"
-        )))
-        await onEvent(.sessionUpdated(session))
+        let targetFolder = session.workspacePath ?? WorkspaceResolver.defaultWorkspacePath()
+        let folderName = URL(fileURLWithPath: targetFolder).lastPathComponent
 
-        // Build assignments from verdict (or synthesize 1 clean assignment from actionSteps if none were pre-populated)
+        // Ensure target directory exists on disk before builders run
+        try? FileManager.default.createDirectory(atPath: targetFolder, withIntermediateDirectories: true)
+
         var assignments = verdict.executionAssignments ?? []
+        let trimmedExtra = extraInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If the Verdict came from Debate Mode without granular file workstreams (or user supplied extra build notes),
+        // let the Chair inspect the target folder and decompose the plan into concrete workstreams first!
+        if assignments.isEmpty || !trimmedExtra.isEmpty {
+            session.stage = .synthesizingVerdict
+            await onEvent(.activeThinkersChanged(
+                [moderator.id],
+                statusLabel: "\(moderator.name) is mapping build workstreams for \(folderName)…"
+            ))
+            await onEvent(.sessionUpdated(session))
+
+            let blueprintResp = try await runner.call(ModelCallRequest(
+                provider: moderator.provider,
+                modelID: moderator.modelID,
+                effort: moderator.effort,
+                systemPrompt: DebatePrompts.buildBlueprintSystemPrompt(
+                    moderator: moderator,
+                    debaters: debaters,
+                    workspacePath: targetFolder,
+                    extraInstruction: trimmedExtra
+                ),
+                userPrompt: buildTranscriptContext(for: session),
+                allowWebSearch: session.allowWebSearch,
+                toolPhase: .researchAndInspect,
+                workspacePath: targetFolder,
+                openRouterAPIKey: openRouterKey
+            ))
+            let decomposed = parseVerdict(raw: blueprintResp.rawText, moderator: moderator, debaters: debaters)
+            if let newAssignments = decomposed.executionAssignments, !newAssignments.isEmpty {
+                assignments = newAssignments
+                verdict.executionAssignments = newAssignments
+                if let idx = session.entries.firstIndex(where: { $0.id == verdictID }) {
+                    session.entries[idx] = .verdict(verdict)
+                }
+            }
+        }
+
         if assignments.isEmpty {
             let combinedSteps = verdict.actionSteps.isEmpty
                 ? verdict.recommendation
                 : verdict.actionSteps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-            let defaultExecutor = debaters.first ?? moderator
+            let defaultExecutor = selectPrimaryBuilder(from: debaters, excluding: nil, fallback: moderator)
             assignments = [
                 ExecutionAssignment(
                     assignedPersonaName: defaultExecutor.name,
-                    taskInstruction: "Implement and verify the Co-Signed Verdict:\n\(combinedSteps)",
-                    targetScope: session.workspacePath ?? ""
+                    taskInstruction: "Implement and verify the agreed plan in \(targetFolder):\n\(combinedSteps)",
+                    targetScope: targetFolder
                 )
             ]
         }
+
+        session.stage = .executingPlan
+        session.entries.append(.roundBanner(RoundBanner(
+            roundNumber: 98,
+            title: "Build Phase · Multi-Agent Implementation (\(folderName))",
+            subtitle: "\(moderator.name) is coordinating \(assignments.count) sequential workstreams inside \(targetFolder)"
+        )))
+        await onEvent(.sessionUpdated(session))
 
         let allCouncil = [moderator] + debaters
         for (idx, assignment) in assignments.enumerated() {
@@ -289,11 +376,11 @@ public final class DebateOrchestrator: Sendable {
             let executor = allCouncil.first {
                 $0.name.localizedCaseInsensitiveContains(assignment.assignedPersonaName)
                 || assignment.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
-            } ?? moderator
+            } ?? selectPrimaryBuilder(from: debaters, excluding: nil, fallback: moderator)
 
             await onEvent(.activeThinkersChanged(
                 [executor.id],
-                statusLabel: "Step \(idx + 1)/\(assignments.count): \(executor.name) is executing edits (\(moderator.name) coordinating)…"
+                statusLabel: "Workstream \(idx + 1)/\(assignments.count): \(executor.name) is building in \(folderName)…"
             ))
 
             let liveContext = buildTranscriptContext(for: session)
@@ -305,20 +392,20 @@ public final class DebateOrchestrator: Sendable {
                     executor: executor,
                     moderatorName: moderator.name,
                     assignment: assignment,
-                    workspacePath: session.workspacePath
+                    workspacePath: targetFolder
                 ),
                 userPrompt: liveContext,
                 allowWebSearch: session.allowWebSearch,
                 toolPhase: .coordinatedReadWrite,
-                workspacePath: session.workspacePath,
+                workspacePath: targetFolder,
                 openRouterAPIKey: openRouterKey
             ))
 
             let execTurn = parseDebateTurn(
                 raw: resp.rawText,
                 durationMs: resp.durationMs,
-                roundNumber: 99,
-                roundLabel: "Execution \(idx + 1)/\(assignments.count)",
+                roundNumber: 98,
+                roundLabel: "Workstream \(idx + 1)/\(assignments.count)",
                 persona: executor,
                 modelLabel: modelLabels[executor.modelID] ?? executor.modelID,
                 defaultStance: .executing
@@ -330,11 +417,141 @@ public final class DebateOrchestrator: Sendable {
                 id: execTurn.id,
                 persona: executor,
                 spokenText: execTurn.spokenTake,
-                contextLabel: "Executed · \(executor.name)"
+                contextLabel: "Built · \(executor.name)"
+            )))
+        }
+
+        // --- ADVERSARIAL QA & VERIFICATION GATE ---
+        try Task.checkCancellation()
+        let verifier = selectVerifier(from: debaters, fallback: moderator)
+        session.stage = .verifyingBuild
+        session.entries.append(.roundBanner(RoundBanner(
+            roundNumber: 99,
+            title: "Verification Gate · Build & Test QA",
+            subtitle: "\(verifier.name) is running builds, tests, and checking edge cases in \(folderName)"
+        )))
+        await onEvent(.activeThinkersChanged(
+            [verifier.id],
+            statusLabel: "\(verifier.name) is running build & verification checks in \(folderName)…"
+        ))
+        await onEvent(.sessionUpdated(session))
+
+        let qaContext = buildTranscriptContext(for: session)
+        let qaResp = try await runner.call(ModelCallRequest(
+            provider: verifier.provider,
+            modelID: verifier.modelID,
+            effort: verifier.effort,
+            systemPrompt: DebatePrompts.buildVerificationGatePrompt(
+                verifier: verifier,
+                moderatorName: moderator.name,
+                workspacePath: targetFolder
+            ),
+            userPrompt: qaContext,
+            allowWebSearch: session.allowWebSearch,
+            toolPhase: .coordinatedReadWrite,
+            workspacePath: targetFolder,
+            openRouterAPIKey: openRouterKey
+        ))
+
+        let qaJSON = JSONExtractor.parseObject(qaResp.rawText)
+        var verificationPassed = (qaJSON?["verification_passed"] as? Bool) ?? true
+        let issuesFound = (qaJSON?["issues_found"] as? [String])?.filter { !$0.isEmpty } ?? []
+        var filesSummary = (qaJSON?["files_summary"] as? [String])?.filter { !$0.isEmpty } ?? []
+        var howToRun = (qaJSON?["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let qaTurn = parseDebateTurn(
+            raw: qaResp.rawText,
+            durationMs: qaResp.durationMs,
+            roundNumber: 99,
+            roundLabel: "QA Gate",
+            persona: verifier,
+            modelLabel: modelLabels[verifier.modelID] ?? verifier.modelID,
+            defaultStance: .verifying
+        )
+        var verificationSummary = qaTurn.spokenTake
+        session.entries.append(.turn(qaTurn))
+        session.updatedAt = Date()
+        await onEvent(.sessionUpdated(session))
+        await onEvent(.enqueueSpeech(SpeechQueueItem(
+            id: qaTurn.id,
+            persona: verifier,
+            spokenText: qaTurn.spokenTake,
+            contextLabel: "QA Gate · \(verifier.name)"
+        )))
+
+        // --- AUTOMATED FIX PASS IF QA CAUGHT ISSUES ---
+        if !verificationPassed && !issuesFound.isEmpty {
+            try Task.checkCancellation()
+            let fixer = selectPrimaryBuilder(from: debaters, excluding: verifier, fallback: moderator)
+            session.stage = .executingPlan
+            await onEvent(.activeThinkersChanged(
+                [fixer.id],
+                statusLabel: "\(fixer.name) is fixing \(issuesFound.count) QA issue(s) caught by \(verifier.name)…"
+            ))
+            await onEvent(.sessionUpdated(session))
+
+            let fixResp = try await runner.call(ModelCallRequest(
+                provider: fixer.provider,
+                modelID: fixer.modelID,
+                effort: fixer.effort,
+                systemPrompt: DebatePrompts.buildFixPassPrompt(
+                    fixer: fixer,
+                    moderatorName: moderator.name,
+                    verifierName: verifier.name,
+                    issues: issuesFound,
+                    workspacePath: targetFolder
+                ),
+                userPrompt: buildTranscriptContext(for: session),
+                allowWebSearch: session.allowWebSearch,
+                toolPhase: .coordinatedReadWrite,
+                workspacePath: targetFolder,
+                openRouterAPIKey: openRouterKey
+            ))
+
+            if let fixJSON = JSONExtractor.parseObject(fixResp.rawText) {
+                verificationPassed = (fixJSON["verification_passed"] as? Bool) ?? true
+                if let updatedFiles = (fixJSON["files_summary"] as? [String])?.filter({ !$0.isEmpty }), !updatedFiles.isEmpty {
+                    for f in updatedFiles where !filesSummary.contains(f) {
+                        filesSummary.append(f)
+                    }
+                }
+                if let updatedRun = (fixJSON["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !updatedRun.isEmpty {
+                    howToRun = updatedRun
+                }
+            } else {
+                verificationPassed = true
+            }
+
+            let fixTurn = parseDebateTurn(
+                raw: fixResp.rawText,
+                durationMs: fixResp.durationMs,
+                roundNumber: 99,
+                roundLabel: "Fix & Re-Verify",
+                persona: fixer,
+                modelLabel: modelLabels[fixer.modelID] ?? fixer.modelID,
+                defaultStance: .executing
+            )
+            verificationSummary = fixTurn.spokenTake
+            session.entries.append(.turn(fixTurn))
+            session.updatedAt = Date()
+            await onEvent(.sessionUpdated(session))
+            await onEvent(.enqueueSpeech(SpeechQueueItem(
+                id: fixTurn.id,
+                persona: fixer,
+                spokenText: fixTurn.spokenTake,
+                contextLabel: "Fixed · \(fixer.name)"
             )))
         }
 
         verdict.wasExecuted = true
+        verdict.buildReport = BuildReport(
+            buildFolder: targetFolder,
+            verificationPassed: verificationPassed,
+            verifierName: verifier.name,
+            verificationSummary: ExpressiveCleaner.stripCues(verificationSummary),
+            filesSummary: filesSummary,
+            howToRun: howToRun
+        )
         if let updatedIdx = session.entries.firstIndex(where: {
             if case .verdict(let v) = $0 { return v.id == verdictID }
             return false
@@ -343,9 +560,213 @@ public final class DebateOrchestrator: Sendable {
         }
         session.stage = .completed
         session.updatedAt = Date()
-        await onEvent(.activeThinkersChanged([], statusLabel: "Coordinated edits complete"))
+        await onEvent(.activeThinkersChanged([], statusLabel: "Build & verification complete in \(folderName)"))
         await onEvent(.sessionUpdated(session))
         return session
+    }
+
+    // MARK: - Collaborative Build Mode Pipeline (Huddle -> Blueprint -> Build -> QA Gate)
+
+    private func runBuildSessionToCompletion(
+        session initialSession: DebateSession,
+        moderator: Persona,
+        debaters: [Persona],
+        modelLabels: [String: String],
+        openRouterKey: String?,
+        isIncrementalFollowUp: Bool,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async throws -> DebateSession {
+        var session = initialSession
+        let targetFolder = session.workspacePath ?? WorkspaceResolver.defaultWorkspacePath()
+        let folderName = URL(fileURLWithPath: targetFolder).lastPathComponent
+        try? FileManager.default.createDirectory(atPath: targetFolder, withIntermediateDirectories: true)
+
+        if session.title == "New Council Session",
+           let firstPrompt = session.entries.compactMap({ entry -> String? in
+               if case .userPrompt(let m) = entry { return m.text }
+               return nil
+           }).first {
+            session.title = Self.quickHeuristicTitle(from: firstPrompt)
+        }
+
+        // Phase 1: Fast Parallel Architecture & Workstream Huddle
+        session.stage = .debating
+        session.entries.append(.roundBanner(RoundBanner(
+            roundNumber: 1,
+            title: isIncrementalFollowUp ? "Build Huddle · Incremental Design" : "Phase 1 · Architecture & Workstream Huddle",
+            subtitle: "Specialists inspect \(folderName) in parallel and propose clean module boundaries"
+        )))
+        await onEvent(.activeThinkersChanged(
+            Set(debaters.map(\.id)),
+            statusLabel: "Huddle: Specialists inspecting \(folderName) & aligning on build architecture…"
+        ))
+        await onEvent(.sessionUpdated(session))
+
+        let huddleContext = buildTranscriptContext(for: session)
+        let (huddleTurns, huddleFailures) = try await runParallelBuildHuddle(
+            debaters: debaters,
+            transcriptContext: huddleContext,
+            session: session,
+            targetFolder: targetFolder,
+            modelLabels: modelLabels,
+            openRouterKey: openRouterKey
+        )
+        for note in huddleFailures {
+            session.entries.append(.systemNote(UUID(), note))
+        }
+        for turn in huddleTurns {
+            try Task.checkCancellation()
+            session.entries.append(.turn(turn))
+            session.updatedAt = Date()
+            await onEvent(.sessionUpdated(session))
+            if let speaker = debaters.first(where: { $0.id == turn.personaID }) {
+                await onEvent(.enqueueSpeech(SpeechQueueItem(
+                    id: turn.id,
+                    persona: speaker,
+                    spokenText: turn.spokenTake,
+                    contextLabel: "Huddle · \(speaker.name)"
+                )))
+            }
+        }
+
+        // Phase 2: Chair Synthesizes Concrete Multi-Agent Build Blueprint
+        try Task.checkCancellation()
+        session.stage = .synthesizingVerdict
+        await onEvent(.activeThinkersChanged(
+            [moderator.id],
+            statusLabel: "\(moderator.name) is locking in the Build Blueprint & assigning workstreams…"
+        ))
+        await onEvent(.sessionUpdated(session))
+
+        let blueprintResp = try await runner.call(ModelCallRequest(
+            provider: moderator.provider,
+            modelID: moderator.modelID,
+            effort: moderator.effort,
+            systemPrompt: DebatePrompts.buildBlueprintSystemPrompt(
+                moderator: moderator,
+                debaters: debaters,
+                workspacePath: targetFolder
+            ),
+            userPrompt: buildTranscriptContext(for: session),
+            allowWebSearch: session.allowWebSearch,
+            toolPhase: .researchAndInspect,
+            workspacePath: targetFolder,
+            openRouterAPIKey: openRouterKey
+        ))
+
+        var blueprint = parseVerdict(raw: blueprintResp.rawText, moderator: moderator, debaters: debaters)
+        blueprint.shouldAutoExecute = true
+        session.entries.append(.verdict(blueprint))
+        session.updatedAt = Date()
+        await onEvent(.sessionUpdated(session))
+        await onEvent(.enqueueSpeech(SpeechQueueItem(
+            id: blueprint.id,
+            persona: moderator,
+            spokenText: blueprint.spokenVerdict,
+            contextLabel: "Build Blueprint · \(moderator.name)"
+        )))
+
+        // Phase 3 + 4 + 5: Execute Workstreams -> Adversarial QA Verification -> Auto-Fix Pass
+        return try await executeVerdictPlan(
+            verdictID: blueprint.id,
+            into: session,
+            moderator: moderator,
+            debaters: debaters,
+            modelLabels: modelLabels,
+            openRouterKey: openRouterKey,
+            onEvent: onEvent
+        )
+    }
+
+    private func runParallelBuildHuddle(
+        debaters: [Persona],
+        transcriptContext: String,
+        session: DebateSession,
+        targetFolder: String,
+        modelLabels: [String: String],
+        openRouterKey: String?
+    ) async throws -> ([DebateTurn], [String]) {
+        let webOn = session.allowWebSearch
+        return try await withThrowingTaskGroup(of: (Int, String, Result<DebateTurn, Error>).self) { group in
+            for (index, debater) in debaters.enumerated() {
+                let modelLabel = modelLabels[debater.modelID] ?? debater.modelID
+                group.addTask { [runner] in
+                    do {
+                        let resp = try await runner.call(ModelCallRequest(
+                            provider: debater.provider,
+                            modelID: debater.modelID,
+                            effort: debater.effort,
+                            systemPrompt: DebatePrompts.buildHuddleSpecialistPrompt(
+                                debater: debater,
+                                allDebaters: debaters,
+                                workspacePath: targetFolder
+                            ),
+                            userPrompt: transcriptContext,
+                            allowWebSearch: webOn,
+                            toolPhase: .researchAndInspect,
+                            workspacePath: targetFolder,
+                            openRouterAPIKey: openRouterKey
+                        ))
+                        let turn = self.parseDebateTurn(
+                            raw: resp.rawText,
+                            durationMs: resp.durationMs,
+                            roundNumber: 1,
+                            roundLabel: "Build Huddle",
+                            persona: debater,
+                            modelLabel: modelLabel,
+                            defaultStance: .building
+                        )
+                        return (index, debater.name, .success(turn))
+                    } catch {
+                        return (index, debater.name, .failure(error))
+                    }
+                }
+            }
+
+            var successes: [(Int, DebateTurn)] = []
+            var failures: [String] = []
+            var firstError: Error?
+            for try await (idx, name, result) in group {
+                switch result {
+                case .success(let turn):
+                    successes.append((idx, turn))
+                case .failure(let err):
+                    if Task.isCancelled { throw ModelRunnerError.cancelled }
+                    if case ModelRunnerError.cancelled = err { throw err }
+                    firstError = firstError ?? err
+                    failures.append("\(name) skipped huddle: \(err.localizedDescription)")
+                }
+            }
+            if successes.isEmpty, let firstError {
+                throw firstError
+            }
+            return (successes.sorted { $0.0 < $1.0 }.map(\.1), failures)
+        }
+    }
+
+    private func selectVerifier(from debaters: [Persona], fallback: Persona) -> Persona {
+        if let skeptic = debaters.first(where: {
+            $0.name.localizedCaseInsensitiveContains("Sable")
+            || $0.title.localizedCaseInsensitiveContains("Skeptic")
+            || $0.title.localizedCaseInsensitiveContains("Critic")
+            || $0.title.localizedCaseInsensitiveContains("Security")
+        }) {
+            return skeptic
+        }
+        return debaters.last ?? fallback
+    }
+
+    private func selectPrimaryBuilder(from debaters: [Persona], excluding: Persona?, fallback: Persona) -> Persona {
+        let candidates = debaters.filter { $0.id != excluding?.id }
+        if let pragmatist = candidates.first(where: {
+            $0.name.localizedCaseInsensitiveContains("Marcus")
+            || $0.title.localizedCaseInsensitiveContains("Pragmatist")
+            || $0.title.localizedCaseInsensitiveContains("Builder")
+            || $0.title.localizedCaseInsensitiveContains("Architect")
+        }) {
+            return pragmatist
+        }
+        return candidates.first ?? fallback
     }
 
     /// Synthesizes a tailored coding-harness handoff prompt using the Chair when the user wants custom AI synthesis/filtering.
@@ -1037,5 +1458,17 @@ public final class DebateOrchestrator: Sendable {
             .map(String.init)
         let joined = words.joined(separator: " ")
         return joined.isEmpty ? "Council Session" : (words.count >= 7 ? "\(joined)…" : joined)
+    }
+}
+
+private enum ExpressiveCleaner {
+    static func stripCues(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: #"[\[\(](chuckle|laugh|sigh|clears? throat|cough|gasp|groan)[\]\)]"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

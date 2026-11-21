@@ -34,11 +34,12 @@ public enum VocalSegment: Equatable, Hashable, Sendable {
 
 public enum ExpressiveTagFormatter {
     private static let tagPattern = try! NSRegularExpression(
-        pattern: #"\[(chuckle|laugh|sigh|clear throat|cough|gasp|groan)\]"#,
+        pattern: #"[\[\(](chuckle|laugh|sigh|clears? throat|cough|gasp|groan)[\]\)]"#,
         options: [.caseInsensitive]
     )
 
-    /// Splits a raw spoken line (e.g. `"[chuckle] Hold on Marcus, that won't scale."`) into text & subtle stage cues for UI display.
+    /// Splits a raw spoken line (e.g. `"(laugh) Hold on Marcus, that won't scale."` or legacy `"[chuckle] ..."`)
+    /// into spoken words & subtle stage cues for UI display.
     public static func parseSegments(_ raw: String) -> [VocalSegment] {
         let ns = raw as NSString
         let matches = tagPattern.matches(in: raw, range: NSRange(location: 0, length: ns.length))
@@ -67,7 +68,45 @@ public enum ExpressiveTagFormatter {
         return segments
     }
 
-    /// Strips bracketed vocal tags when falling back to plain system speech so fallback voices never read "[chuckle]" literally.
+    /// Converts bracketed or variant vocal tags into Breeze TTS 2's native English parenthetical cues:
+    /// `(laugh)`, `(sigh)`, `(clears throat)`, `(cough)`.
+    public static func normalizeForBreeze(_ raw: String) -> String {
+        let ns = raw as NSString
+        let matches = tagPattern.matches(in: raw, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return raw }
+
+        var out = ""
+        var cursor = 0
+        for m in matches {
+            if m.range.location > cursor {
+                out += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
+            }
+            let rawTag = ns.substring(with: m.range(at: 1)).lowercased()
+            let breezeTag: String
+            switch rawTag {
+            case "chuckle", "laugh":
+                breezeTag = "(laugh)"
+            case "sigh", "gasp", "groan":
+                breezeTag = "(sigh)"
+            case "clear throat", "clears throat":
+                breezeTag = "(clears throat)"
+            case "cough":
+                breezeTag = "(cough)"
+            default:
+                breezeTag = "(sigh)"
+            }
+            out += breezeTag
+            cursor = m.range.location + m.range.length
+        }
+        if cursor < ns.length {
+            out += ns.substring(from: cursor)
+        }
+        return out
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Strips vocal tags when falling back to plain macOS system speech so fallback voices never read tags literally.
     public static func stripTags(_ raw: String) -> String {
         let ns = raw as NSString
         let stripped = tagPattern.stringByReplacingMatches(
@@ -85,7 +124,7 @@ public enum ExpressiveTagFormatter {
         case "chuckle": return "chuckles"
         case "laugh": return "laughs"
         case "sigh": return "sighs"
-        case "clear throat": return "clears throat"
+        case "clear throat", "clears throat": return "clears throat"
         case "cough": return "coughs"
         case "gasp": return "gasps"
         case "groan": return "groans"

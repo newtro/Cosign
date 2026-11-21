@@ -429,4 +429,137 @@ final class CosignCoreTests: XCTestCase {
         XCTAssertTrue(prompt.contains("**Watchout (Sable):**"))
         XCTAssertTrue(prompt.contains("Preserve existing markdown headings where possible."))
     }
+
+    func testCollaborativeBuildModeAndVerificationFixLoop() async throws {
+        let personas = DefaultRoster.personas
+        let moderator = personas.first { $0.role == .moderator }!
+        let debaters = Array(personas.filter { $0.role == .debater }.prefix(3))
+        let tempBuildDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-build-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempBuildDir) }
+
+        let runner = FakeModelRunner { req in
+            XCTAssertEqual(req.workspacePath, tempBuildDir.path)
+            if req.systemPrompt.contains("BUILD MODE INTAKE") {
+                return ModelCallResponse(rawText: """
+                {
+                  "session_title": "Markdown CLI Converter",
+                  "needs_interview": false,
+                  "spoken_intro": "",
+                  "supporting_notes": "Greenfield empty folder.",
+                  "questions": []
+                }
+                """, durationMs: 20)
+            } else if req.systemPrompt.contains("ARCHITECTURE & WORKSTREAM HUDDLE") {
+                XCTAssertEqual(req.toolPhase, .researchAndInspect)
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "building",
+                  "spoken_take": "(laugh) Let's keep it dependency-free Python with pytest tests.",
+                  "supporting_notes": "src/md2html.py + tests/test_md2html.py",
+                  "key_points": ["Zero deps"],
+                  "tools_used": "Checked empty build folder"
+                }
+                """, durationMs: 30)
+            } else if req.systemPrompt.contains("CONCRETE MULTI-AGENT BUILD BLUEPRINT") {
+                return ModelCallResponse(rawText: """
+                {
+                  "headline": "Build Zero-Dep Markdown CLI + Pytest Suite",
+                  "spoken_verdict": "Marcus builds the parser and CLI, Orion writes the tests and README, then Sable runs QA.",
+                  "recommendation": "Two sequential workstreams followed by QA gate.",
+                  "action_steps": ["Implement parser", "Add tests"],
+                  "cosigned_by": ["Marcus", "Orion", "Sable"],
+                  "should_auto_execute": true,
+                  "execution_assignments": [
+                    {
+                      "assigned_to": "Marcus",
+                      "task_instruction": "Create md2html.py",
+                      "target_scope": "md2html.py"
+                    },
+                    {
+                      "assigned_to": "Orion",
+                      "task_instruction": "Create test_md2html.py",
+                      "target_scope": "test_md2html.py"
+                    }
+                  ]
+                }
+                """, durationMs: 35)
+            } else if req.systemPrompt.contains("ASSIGNED TASK:") {
+                XCTAssertEqual(req.toolPhase, .coordinatedReadWrite)
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "executing",
+                  "spoken_take": "Implemented assigned module cleanly.",
+                  "supporting_notes": "Wrote files.",
+                  "key_points": ["Created files"],
+                  "tools_used": "Wrote module"
+                }
+                """, durationMs: 40)
+            } else if req.systemPrompt.contains("ADVERSARIAL QA & VERIFICATION GATE") {
+                XCTAssertEqual(req.toolPhase, .coordinatedReadWrite)
+                // Simulate Sable catching 1 bug so the auto-fix pass runs!
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "verifying",
+                  "verification_passed": false,
+                  "spoken_take": "(sigh) Caught one bug—fenced code blocks drop blank lines.",
+                  "issues_found": ["Preserve blank lines inside fenced code blocks in md2html.py"],
+                  "files_summary": ["md2html.py — CLI parser", "test_md2html.py — unit tests"],
+                  "how_to_run": "python3 md2html.py README.md",
+                  "supporting_notes": "1 failing test.",
+                  "key_points": ["1 edge case caught"]
+                }
+                """, durationMs: 45)
+            } else if req.systemPrompt.contains("ISSUES TO FIX AND RE-VERIFY") {
+                XCTAssertEqual(req.toolPhase, .coordinatedReadWrite)
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "executing",
+                  "verification_passed": true,
+                  "spoken_take": "Fixed fenced code block blank lines and all 8 tests now pass.",
+                  "files_summary": ["md2html.py — fixed code block handling"],
+                  "how_to_run": "python3 md2html.py input.md",
+                  "supporting_notes": "All tests green.",
+                  "key_points": ["8/8 tests passing"]
+                }
+                """, durationMs: 40)
+            }
+            return ModelCallResponse(rawText: "{}", durationMs: 10)
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        let buildSession = DebateSession(
+            moderatorID: moderator.id,
+            debaterIDs: debaters.map(\.id),
+            mode: .build,
+            hasExplicitBuildFolder: true,
+            workspacePath: tempBuildDir.path
+        )
+
+        let finished = try await orchestrator.submitUserMessage(
+            text: "Build a Markdown to HTML CLI converter with tests.",
+            into: buildSession,
+            moderator: moderator,
+            debaters: debaters
+        ) { _ in }
+
+        XCTAssertEqual(finished.stage, .completed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempBuildDir.path))
+
+        let turns = finished.entries.compactMap { entry -> DebateTurn? in
+            if case .turn(let t) = entry { return t }
+            return nil
+        }
+        // 3 huddle + 2 workstreams + 1 QA gate + 1 fix pass = 7 turns
+        XCTAssertEqual(turns.count, 7)
+        XCTAssertTrue(turns.contains(where: { $0.stance == .verifying && $0.personaName == "Sable" }))
+
+        let verdict = finished.entries.compactMap { entry -> CosignVerdict? in
+            if case .verdict(let v) = entry { return v }
+            return nil
+        }.first
+        XCTAssertEqual(verdict?.wasExecuted, true)
+        XCTAssertEqual(verdict?.buildReport?.verificationPassed, true)
+        XCTAssertEqual(verdict?.buildReport?.verifierName, "Sable")
+        XCTAssertEqual(verdict?.buildReport?.howToRun, "python3 md2html.py input.md")
+    }
 }

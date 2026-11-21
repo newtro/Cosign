@@ -40,10 +40,10 @@ public enum JSONExtractor {
 public enum DebatePrompts {
     public static let expressiveVoiceGuidance = """
     VOICE & EXPRESSIVENESS RULES FOR SPOKEN TEXT:
-    - Your `spoken_take` (or `spoken_intro` / `spoken_verdict`) will be read aloud continuously back-to-back with the other personas by an expressive neural voice engine (Chatterbox Turbo).
-    - Write like a sharp, spirited human speaking live around a studio table—address fellow panelists by first name, use natural conversational flow, contractions, rhythm, and zero markdown bullets or asterisks inside spoken fields.
+    - Your `spoken_take` (or `spoken_intro` / `spoken_verdict`) will be read aloud continuously back-to-back with the other personas by Breeze TTS 2 on Apple Silicon.
+    - Write like a sharp, warm, natural human speaking live around a studio table—address fellow panelists by first name, use natural conversational flow, contractions, rhythm, and zero markdown bullets or asterisks inside spoken fields.
     - Give a satisfying, substantive spoken turn: 3 to 6 flowing sentences (roughly 65 to 115 words) that carry your full point aloud clearly while keeping exhaustive file lists and deep notes in `supporting_notes`.
-    - When genuinely fitting your reaction, you may drop at most ONE natural inline vocal tag from this exact set: `[chuckle]`, `[laugh]`, `[sigh]`, `[clear throat]`, `[cough]`.
+    - When genuinely fitting your reaction, you may drop at most ONE natural inline vocal cue in parentheses from this exact set: `(laugh)`, `(sigh)`, `(clears throat)`, `(cough)`.
     """
 
     public static func workspaceToolsBlock(workspacePath: String?, toolsEnabled: Bool, allowWrites: Bool) -> String {
@@ -367,6 +367,193 @@ public enum DebatePrompts {
         - Write imperative, unambiguous instructions addressed to the coding agent.
         - Preserve exact file paths, script names, architectural constraints, deadlines/gates, and watchouts discovered during the council debate.
         - \(focusRule)
+        """
+    }
+
+    // MARK: - Collaborative Build Mode Prompts
+
+    public static func buildIntakeSystemPrompt(
+        moderator: Persona,
+        debaters: [Persona],
+        workspacePath: String?
+    ) -> String {
+        let rosterDesc = debaters.map { "- \($0.name) (\($0.title)): \($0.tagline)" }.joined(separator: "\n")
+        return """
+        You are \(moderator.name), \(moderator.title), chairing the Cosign council in **BUILD MODE** inside target folder: \(workspacePath ?? "current workspace").
+        Personality: \(moderator.personality)
+        Style: \(moderator.debateStyle)
+
+        Seated council specialists:
+        \(rosterDesc)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
+
+        YOUR TASK (BUILD MODE INTAKE):
+        1. Quickly inspect the target directory (\(workspacePath ?? ".")) to see if it is empty (greenfield project) or an existing repository!
+        2. Give this build session a crisp 3-6 word `session_title`.
+        3. Set `needs_interview` to `true` ONLY if 1-3 critical build choices (e.g. target platform/language, core feature scope, UI vs CLI) are genuinely ambiguous and cannot be inferred from the prompt or folder; otherwise set `false` so the team starts building right away.
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "session_title": "Short 3-6 word project title",
+          "needs_interview": false,
+          "spoken_intro": "1-2 lively spoken sentences introducing any quick build questions (or empty string)",
+          "supporting_notes": "Summary of what already exists in the target folder",
+          "questions": [
+            {
+              "asked_by": "Exact debater name",
+              "question": "Crisp build question?",
+              "why_it_matters": "1 short sentence.",
+              "quick_options": ["Option A", "Option B", "Option C"]
+            }
+          ]
+        }
+        """
+    }
+
+    public static func buildHuddleSpecialistPrompt(
+        debater: Persona,
+        allDebaters: [Persona],
+        workspacePath: String?
+    ) -> String {
+        let peers = allDebaters.filter { $0.id != debater.id }.map { "\($0.name) (\($0.title))" }.joined(separator: ", ")
+        return """
+        You are \(debater.name), \(debater.title), huddling in **BUILD MODE** alongside \(peers) to design and build inside `\(workspacePath ?? ".")`.
+        Personality: \(debater.personality)
+        Style: \(debater.debateStyle)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
+
+        PHASE 1 — ARCHITECTURE & WORKSTREAM HUDDLE:
+        Inspect the target directory (`\(workspacePath ?? ".")`) first. From your specialist angle, propose the cleanest file/module architecture, exact stack/tooling choices, and key edge cases or verification tests we must hit so the project builds and runs cleanly on the first pass. Do NOT edit files yet—the Chair assigns sequential write locks next.
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "stance": "building",
+          "spoken_take": "2-4 punchy spoken sentences pitching your architectural slice and key watchouts to the room.",
+          "supporting_notes": "Concrete directory layout, key files/interfaces, and build/test commands.",
+          "key_points": ["Module / file proposal", "Verification check"],
+          "tools_used": "Short summary of folder/files inspected"
+        }
+        """
+    }
+
+    public static func buildBlueprintSystemPrompt(
+        moderator: Persona,
+        debaters: [Persona],
+        workspacePath: String?,
+        extraInstruction: String = ""
+    ) -> String {
+        let roster = ([moderator] + debaters).map { "\($0.name) (\($0.title))" }.joined(separator: ", ")
+        let extraBlock = extraInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ""
+            : "\nEXTRA USER BUILD NOTE:\n\(extraInstruction)\n"
+        return """
+        You are \(moderator.name), \(moderator.title), orchestrating **BUILD MODE** in `\(workspacePath ?? ".")` across the council (\(roster)).
+        Personality: \(moderator.personality)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
+        \(extraBlock)
+        YOUR TASK — CONCRETE MULTI-AGENT BUILD BLUEPRINT:
+        Synthesize the agreed architecture (or prior Debate Verdict) into an actionable Build Blueprint with **2 to 4 sequential, non-overlapping `execution_assignments`** inside `\(workspacePath ?? ".")`:
+        - Assign each workstream (`assigned_to`) to the best-suited builder on the panel so their strengths shine (e.g. scaffolding & core engine first, features/UI second, tests/docs/polish third).
+        - Make every `task_instruction` concrete and self-contained (exact files to create/edit in `\(workspacePath ?? ".")`, interfaces to match earlier steps, and local check commands).
+        - Set `should_auto_execute` to `true`.
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "headline": "Sharp 5-10 word build blueprint headline",
+          "spoken_verdict": "2-4 spirited spoken sentences kicking off the build and calling out who owns each workstream.",
+          "recommendation": "Concise architectural overview of what is being built in \(workspacePath ?? "the target folder").",
+          "action_steps": ["Workstream 1 summary", "Workstream 2 summary", "Verification & tests"],
+          "key_tradeoffs": ["Key engineering constraint 1"],
+          "cosigned_by": ["Builder 1", "Builder 2"],
+          "dissents": [],
+          "should_auto_execute": true,
+          "execution_assignments": [
+            {
+              "assigned_to": "Exact Persona First Name",
+              "task_instruction": "Create/implement exact files and run syntax/build check.",
+              "target_scope": "Specific files or subdirectory"
+            }
+          ],
+          "supporting_notes": "Module contract notes across workstreams."
+        }
+        """
+    }
+
+    public static func buildVerificationGatePrompt(
+        verifier: Persona,
+        moderatorName: String,
+        workspacePath: String?
+    ) -> String {
+        return """
+        You are \(verifier.name), \(verifier.title), running the **ADVERSARIAL QA & VERIFICATION GATE** for \(moderatorName) inside `\(workspacePath ?? ".")`.
+        Personality: \(verifier.personality)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: true))
+
+        YOUR TASK — BUILD & TEST VERIFICATION GATE:
+        1. Inspect all files created/modified in `\(workspacePath ?? ".")`.
+        2. Run the project's actual build, typecheck, linter, and unit/smoke tests via your CLI shell tools!
+        3. Check for broken imports, missing files, stubbed placeholders, or edge-case bugs. If you spot a tiny trivial typo you can fix in 5 seconds, fix and re-test; if anything substantial is broken or failing tests, set `verification_passed` to `false` and list exact actionable `issues_found` so the Chair can dispatch a Fix Pass.
+        4. Provide the exact shell command(s) the user can run to launch or test the finished project in `how_to_run`.
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "stance": "verifying",
+          "verification_passed": true,
+          "spoken_take": "2-4 sharp spoken sentences reporting what you ran and whether the build passed muster.",
+          "issues_found": [],
+          "files_summary": ["Key file 1 — purpose", "Key file 2 — purpose"],
+          "how_to_run": "Exact command(s) to run or open the project",
+          "supporting_notes": "Build/test command output summary and QA notes.",
+          "key_points": ["Build status", "Test results"],
+          "tools_used": "Exact build/test commands executed"
+        }
+        """
+    }
+
+    public static func buildFixPassPrompt(
+        fixer: Persona,
+        moderatorName: String,
+        verifierName: String,
+        issues: [String],
+        workspacePath: String?
+    ) -> String {
+        let bulletIssues = issues.map { "- \($0)" }.joined(separator: "\n")
+        return """
+        You are \(fixer.name), \(fixer.title), dispatched by \(moderatorName) to resolve QA issues caught by \(verifierName) inside `\(workspacePath ?? ".")`.
+        Personality: \(fixer.personality)
+
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: true))
+
+        ISSUES TO FIX AND RE-VERIFY:
+        \(bulletIssues)
+
+        Fix every issue cleanly in `\(workspacePath ?? ".")` and re-run the build and tests to confirm everything passes with exit code 0!
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "stance": "executing",
+          "verification_passed": true,
+          "spoken_take": "2-3 crisp spoken sentences confirming the fixes and clean build/test run.",
+          "files_summary": ["Updated file — fix applied"],
+          "how_to_run": "Exact command(s) to run the verified project",
+          "supporting_notes": "Details of fixes and passing test output.",
+          "key_points": ["All QA issues resolved", "Build & tests green"],
+          "tools_used": "Files edited and verification commands re-run"
+        }
         """
     }
 }

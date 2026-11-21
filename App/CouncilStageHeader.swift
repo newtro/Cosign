@@ -35,7 +35,7 @@ struct CouncilStageHeader: View {
                         }
                         .transition(.opacity)
                     } else {
-                        Text("\(debaters.count) Debaters + 1 Chair · Subscription CLIs")
+                        Text("\(session.activeMode.displayName) · \(debaters.count) Specialists + 1 Chair · Subscription CLIs")
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(StudioTheme.inkMuted)
                     }
@@ -43,13 +43,20 @@ struct CouncilStageHeader: View {
 
                 Spacer(minLength: 12)
 
-                // Workspace Selector, Lineup Switcher & Studio Controls
+                // Workspace / Build Folder Selector, Lineup Switcher & Studio Controls
                 HStack(spacing: 8) {
                     let wsPath = session.workspacePath ?? WorkspaceResolver.defaultWorkspacePath()
                     let wsName = URL(fileURLWithPath: wsPath).lastPathComponent
+                    let needsBuildFolder = session.activeMode == .build
+                        && session.hasExplicitBuildFolder != true
+                        && WorkspaceResolver.isParentReposContainer(wsPath)
+                    let folderTint = needsBuildFolder ? StudioTheme.brassBright : StudioTheme.emerald
                     Menu {
-                        Button("Choose Folder or Repo…") {
-                            model.chooseWorkspaceFolderWithPanel()
+                        Button("Select or Create Project Folder…") {
+                            model.chooseWorkspaceFolderWithPanel(forBuild: session.activeMode == .build)
+                        }
+                        Button("Reveal Current Folder in Finder") {
+                            model.openFolderInFinder(wsPath)
                         }
                         Divider()
                         ForEach(model.quickSwitchRepoPaths, id: \.self) { candidate in
@@ -66,12 +73,12 @@ struct CouncilStageHeader: View {
                         }
                     } label: {
                         HStack(spacing: 5) {
-                            Image(systemName: "folder.fill")
+                            Image(systemName: needsBuildFolder ? "folder.badge.plus" : "folder.fill")
                                 .font(.system(size: 10.5))
-                                .foregroundStyle(StudioTheme.emerald)
-                            Text(wsName.isEmpty ? "Workspace" : wsName)
+                                .foregroundStyle(folderTint)
+                            Text(needsBuildFolder ? "Select Build Folder…" : (wsName.isEmpty ? "Workspace" : wsName))
                                 .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(StudioTheme.inkSecondary)
+                                .foregroundStyle(needsBuildFolder ? StudioTheme.brassBright : StudioTheme.inkSecondary)
                                 .lineLimit(1)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 8.5, weight: .bold))
@@ -79,12 +86,12 @@ struct CouncilStageHeader: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.white.opacity(0.045)))
-                        .overlay(Capsule().strokeBorder(StudioTheme.emerald.opacity(0.28), lineWidth: 1))
+                        .background(Capsule().fill(folderTint.opacity(needsBuildFolder ? 0.12 : 0.045)))
+                        .overlay(Capsule().strokeBorder(folderTint.opacity(needsBuildFolder ? 0.45 : 0.28), lineWidth: 1))
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                    .help("Active workspace folder for CLI repo/file tools: \(wsPath)")
+                    .help("Active target folder for CLI inspection & Build Mode: \(wsPath)")
 
                     Button {
                         model.showingLineupPopover.toggle()
@@ -180,13 +187,14 @@ struct CouncilStageHeader: View {
     private func stageBadge(for stage: SessionStage) -> some View {
         let (label, color): (String, Color) = {
             switch stage {
-            case .idle: return ("Ready", StudioTheme.inkMuted)
+            case .idle: return (session.activeMode == .build ? "Ready to Build" : "Ready", StudioTheme.inkMuted)
             case .scanningIntake: return ("Intake Scan", StudioTheme.brass)
             case .awaitingInterviewAnswers: return ("Awaiting Your Input", StudioTheme.brassBright)
-            case .debating: return ("Live Debate", StudioTheme.sky)
-            case .synthesizingVerdict: return ("Drafting Verdict", StudioTheme.brassBright)
-            case .executingPlan: return ("Coordinating Edits", StudioTheme.emerald)
-            case .completed: return ("Co-Signed", StudioTheme.emerald)
+            case .debating: return (session.activeMode == .build ? "Architecture Huddle" : "Live Debate", StudioTheme.sky)
+            case .synthesizingVerdict: return (session.activeMode == .build ? "Build Blueprint" : "Drafting Verdict", StudioTheme.brassBright)
+            case .executingPlan: return ("Building Code", StudioTheme.emerald)
+            case .verifyingBuild: return ("QA & Verification", StudioTheme.sky)
+            case .completed: return (session.activeMode == .build ? "Built & Verified" : "Co-Signed", StudioTheme.emerald)
             case .cancelled: return ("Paused", StudioTheme.inkMuted)
             case .error: return ("Attention Needed", StudioTheme.crimson)
             }

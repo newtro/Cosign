@@ -9,7 +9,7 @@ struct EmptyCouncilWelcomeView: View {
     let session: DebateSession
     let onSelectStarter: (String) -> Void
 
-    private let starters: [(icon: String, title: String, subtitle: String, prompt: String)] = [
+    private let debateStarters: [(icon: String, title: String, subtitle: String, prompt: String)] = [
         (
             "lightbulb.max.fill",
             "Shape a Half-Baked App Idea",
@@ -36,9 +36,41 @@ struct EmptyCouncilWelcomeView: View {
         ),
     ]
 
+    private let buildStarters: [(icon: String, title: String, subtitle: String, prompt: String)] = [
+        (
+            "hammer.fill",
+            "Build a New App from Scratch",
+            "Huddle → Blueprint → Multi-Agent Build → QA Gate",
+            "Build a clean, self-contained project in this folder with tests and a README—ask me any quick clarifying questions first, then build and verify it end-to-end."
+        ),
+        (
+            "terminal.fill",
+            "Scaffold a Fast CLI Tool",
+            "Design, implement, and run unit tests",
+            "Build a fast command-line utility in this directory with clean subcommands, automated unit tests, and zero unnecessary dependencies."
+        ),
+        (
+            "sparkles.rectangle.stack.fill",
+            "Implement a Feature in Existing Repo",
+            "Inspect repo, split workstreams, verify tests",
+            "Inspect this repository, propose the cleanest implementation plan, divide the workstreams across the council, and verify all existing and new tests pass."
+        ),
+        (
+            "checkmark.shield.fill",
+            "Audit, Fix & Harden Repo",
+            "Find real bugs, fix them, and prove with tests",
+            "Audit this codebase for bugs or missing test coverage, implement surgical fixes sequentially, and verify the full build and test suite pass."
+        ),
+    ]
+
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer(minLength: 24)
+        let isBuild = session.activeMode == .build
+        let activeStarters = isBuild ? buildStarters : debateStarters
+        let wsPath = session.workspacePath ?? WorkspaceResolver.defaultWorkspacePath()
+        let needsFolder = isBuild && session.hasExplicitBuildFolder != true && WorkspaceResolver.isParentReposContainer(wsPath)
+
+        VStack(spacing: 24) {
+            Spacer(minLength: 20)
 
             // Emblem & Editorial Welcome
             VStack(spacing: 12) {
@@ -46,7 +78,7 @@ struct EmptyCouncilWelcomeView: View {
                     Circle()
                         .fill(
                             RadialGradient(
-                                colors: [StudioTheme.brass.opacity(0.28), .clear],
+                                colors: [(isBuild ? StudioTheme.emerald : StudioTheme.brass).opacity(0.28), .clear],
                                 center: .center,
                                 startRadius: 6,
                                 endRadius: 56
@@ -65,36 +97,57 @@ struct EmptyCouncilWelcomeView: View {
                         .frame(width: 68, height: 68)
                         .overlay(
                             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                .strokeBorder(StudioTheme.brass.opacity(0.45), lineWidth: 1.2)
+                                .strokeBorder((isBuild ? StudioTheme.emerald : StudioTheme.brass).opacity(0.45), lineWidth: 1.2)
                         )
-                        .shadow(color: StudioTheme.brass.opacity(0.25), radius: 16, y: 6)
+                        .shadow(color: (isBuild ? StudioTheme.emerald : StudioTheme.brass).opacity(0.25), radius: 16, y: 6)
 
-                    Image(systemName: "signature")
+                    Image(systemName: isBuild ? "hammer.fill" : "signature")
                         .font(.system(size: 28, weight: .bold))
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [StudioTheme.brassBright, StudioTheme.brass],
+                                colors: isBuild ? [StudioTheme.emerald, StudioTheme.sky] : [StudioTheme.brassBright, StudioTheme.brass],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                 }
 
-                Text("Bring Your Idea to the Council")
+                Text(isBuild ? "Build Together with the Council" : "Bring Your Idea to the Council")
                     .font(.system(size: 26, weight: .bold, design: .serif))
                     .foregroundStyle(StudioTheme.inkPrimary)
 
-                Text("Pitch a rough spark or tough decision. The panel will interview you on what's missing,\ndebate it aloud in compact turns, and deliver a Co-Signed Verdict.")
+                Text(isBuild
+                     ? "Pick or create a local folder. The council will align on architecture, divide sequential workstreams,\nwrite code, and run an adversarial QA & test verification gate."
+                     : "Pitch a rough spark or tough decision. The panel will interview you on what's missing,\ndebate it aloud in compact turns, and deliver a Co-Signed Verdict.")
                     .font(.system(size: 13.5))
                     .lineSpacing(3.5)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(StudioTheme.inkSecondary)
-                    .frame(maxWidth: 560)
+                    .frame(maxWidth: 580)
+
+                if isBuild {
+                    Button {
+                        model.chooseWorkspaceFolderWithPanel(forBuild: true)
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: needsFolder ? "folder.badge.plus" : "folder.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(needsFolder ? "Select or Create Target Build Folder…" : "Build Folder: \(wsPath)")
+                                .font(.system(size: 12.5, weight: .semibold, design: needsFolder ? .default : .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(StudioPillButtonStyle(tint: needsFolder ? StudioTheme.brassBright : StudioTheme.emerald, active: true))
+                    .frame(maxWidth: 540)
+                }
             }
 
             // 2x2 Starter Cards
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                ForEach(Array(starters.enumerated()), id: \.offset) { _, item in
+                ForEach(Array(activeStarters.enumerated()), id: \.offset) { _, item in
                     StarterPromptTile(
                         icon: item.icon,
                         title: item.title,
@@ -241,8 +294,12 @@ struct StudioComposerDock: View {
             HStack(alignment: .bottom, spacing: 12) {
                 TextField(
                     session.entries.isEmpty
-                        ? "Pitch an idea or question for the council… (VoiceSmith ready)"
-                        : "Follow up, push back, or @mention a panelist…",
+                        ? (session.activeMode == .build
+                            ? "Describe the project or feature for the council to build… (VoiceSmith ready)"
+                            : "Pitch an idea or question for the council… (VoiceSmith ready)")
+                        : (session.activeMode == .build
+                            ? "Ask for the next feature, fix, or @mention a specialist…"
+                            : "Follow up, push back, or @mention a panelist…"),
                     text: $draftText,
                     axis: .vertical
                 )
@@ -289,9 +346,15 @@ struct StudioComposerDock: View {
                         model.sendPrompt(toSend)
                     } label: {
                         HStack(spacing: 6) {
-                            Text(session.entries.isEmpty ? "Convene" : "Send")
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 11, weight: .bold))
+                            if session.activeMode == .build && session.entries.isEmpty {
+                                Image(systemName: "hammer.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("Build")
+                            } else {
+                                Text(session.entries.isEmpty ? "Convene" : "Send")
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
                         }
                     }
                     .buttonStyle(BrassPrimaryButtonStyle())
@@ -303,20 +366,69 @@ struct StudioComposerDock: View {
             .padding(.top, 10)
             .padding(.bottom, 8)
 
-            // Bottom Micro-Controls Bar
-            HStack(spacing: 10) {
-                // Full CLI Tools + Chair Edits Toggle
-                Button {
-                    model.setCurrentSessionCLITools(!session.hasFullCLITools)
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: session.hasFullCLITools ? "hammer.fill" : "lock.fill")
-                            .font(.system(size: 10.5))
-                        Text(session.hasFullCLITools ? "Full CLI + Chair Edits" : "Closed-Book")
+            // Bottom Micro-Controls Bar: Debate | Build Toggle + Folder / Tool Controls
+            HStack(spacing: 9) {
+                // Segmented Mode Toggle: Debate | Build
+                HStack(spacing: 2) {
+                    ForEach(CouncilMode.allCases) { modeOption in
+                        let selected = session.activeMode == modeOption
+                        let tint = modeOption == .build ? StudioTheme.emerald : StudioTheme.brassBright
+                        Button {
+                            model.setCurrentSessionMode(modeOption)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: modeOption.symbolName)
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text(modeOption.shortLabel)
+                                    .font(.system(size: 11.5, weight: .semibold))
+                            }
+                            .foregroundStyle(selected ? StudioTheme.inkPrimary : StudioTheme.inkMuted)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4.5)
+                            .background(
+                                Capsule()
+                                    .fill(selected ? tint.opacity(0.24) : .clear)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(session.stage.isBusy)
                     }
                 }
-                .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: session.hasFullCLITools))
-                .help("When enabled, all personas can inspect local repos & GitHub via CLI tools, and The Chair coordinates sequential file edits")
+                .padding(2)
+                .background(Capsule().fill(Color.white.opacity(0.05)))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+                .help("Switch between Council Debate Mode and Multi-Agent Build Mode")
+
+                if session.activeMode == .build {
+                    let wsPath = session.workspacePath ?? WorkspaceResolver.defaultWorkspacePath()
+                    let wsName = URL(fileURLWithPath: wsPath).lastPathComponent
+                    let needsFolder = session.hasExplicitBuildFolder != true && WorkspaceResolver.isParentReposContainer(wsPath)
+                    Button {
+                        model.chooseWorkspaceFolderWithPanel(forBuild: true)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: needsFolder ? "folder.badge.plus" : "folder.fill")
+                                .font(.system(size: 10.5))
+                            Text(needsFolder ? "Select Build Folder…" : wsName)
+                                .lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(StudioPillButtonStyle(tint: needsFolder ? StudioTheme.brassBright : StudioTheme.emerald, active: true))
+                    .help("Choose an existing project directory or create a new folder for the council to build in (\(wsPath))")
+                } else {
+                    // Full CLI Tools + Chair Edits Toggle
+                    Button {
+                        model.setCurrentSessionCLITools(!session.hasFullCLITools)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: session.hasFullCLITools ? "hammer.fill" : "lock.fill")
+                                .font(.system(size: 10.5))
+                            Text(session.hasFullCLITools ? "Full CLI + Chair Edits" : "Closed-Book")
+                        }
+                    }
+                    .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: session.hasFullCLITools))
+                    .help("When enabled, all personas can inspect local repos & GitHub via CLI tools, and The Chair coordinates sequential file edits")
+                }
 
                 // Web Search Toggle
                 Button {
@@ -330,35 +442,37 @@ struct StudioComposerDock: View {
                 }
                 .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: session.allowWebSearch))
 
-                // Rebuttal Depth Menu
-                Menu {
-                    ForEach([1, 2, 3], id: \.self) { count in
-                        Button {
-                            model.setCurrentSessionRounds(count)
-                        } label: {
-                            HStack {
-                                Text(count == 1 ? "1 Rebuttal Round (Fast)" : (count == 2 ? "2 Rebuttal Rounds (Balanced)" : "3 Rebuttal Rounds (Deep)"))
-                                if session.maxRebuttalRounds == count {
-                                    Image(systemName: "checkmark")
+                if session.activeMode == .debate {
+                    // Rebuttal Depth Menu
+                    Menu {
+                        ForEach([1, 2, 3], id: \.self) { count in
+                            Button {
+                                model.setCurrentSessionRounds(count)
+                            } label: {
+                                HStack {
+                                    Text(count == 1 ? "1 Rebuttal Round (Fast)" : (count == 2 ? "2 Rebuttal Rounds (Balanced)" : "3 Rebuttal Rounds (Deep)"))
+                                    if session.maxRebuttalRounds == count {
+                                        Image(systemName: "checkmark")
+                                    }
                                 }
                             }
                         }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 10.5))
+                            Text("\(session.maxRebuttalRounds) \(session.maxRebuttalRounds == 1 ? "Rebuttal" : "Rebuttals")")
+                        }
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(StudioTheme.inkSecondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.white.opacity(0.045)))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
                     }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 10.5))
-                        Text("\(session.maxRebuttalRounds) \(session.maxRebuttalRounds == 1 ? "Rebuttal" : "Rebuttals")")
-                    }
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(StudioTheme.inkSecondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(Color.white.opacity(0.045)))
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
 
                 Spacer()
 
@@ -368,13 +482,13 @@ struct StudioComposerDock: View {
                         draftText = ""
                         model.sendPrompt(toSend, skipInterview: true)
                     } label: {
-                        Text("Skip Interview & Debate Straight Away →")
+                        Text(session.activeMode == .build ? "Skip Questions & Build Straight Away →" : "Skip Interview & Debate Straight Away →")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(StudioTheme.inkMuted)
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text("⏎ Convene  ·  ⇧⏎ New line")
+                    Text(session.activeMode == .build ? "⏎ Build  ·  ⇧⏎ New line" : "⏎ Convene  ·  ⇧⏎ New line")
                         .font(.system(size: 11))
                         .foregroundStyle(StudioTheme.inkMuted.opacity(0.75))
                 }
@@ -544,9 +658,9 @@ private struct AudioTransportRibbon: View {
 
     private func statusDescription(_ state: VoiceDaemonState) -> String {
         switch state {
-        case .ready: return "Chatterbox Turbo Expressive Voice · Ready on Metal"
+        case .ready: return "Breeze TTS 2 Studio Voice · Ready on Metal"
         case .starting(let msg): return msg
-        case .idle: return "Chatterbox Turbo · Standby"
+        case .idle: return "Breeze TTS 2 · Standby"
         case .fallbackSystemVoice(let msg): return msg
         }
     }
