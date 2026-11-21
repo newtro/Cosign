@@ -1266,7 +1266,7 @@ public final class DebateOrchestrator: Sendable {
                     modelLabel: modelLabel,
                     stance: stance,
                     targetPersonaName: (target?.isEmpty == false) ? target : nil,
-                    spokenTake: spoken,
+                    spokenTake: SpokenTextSanitizer.clean(spoken),
                     thoughtProcess: thought,
                     keyPoints: points,
                     directQuestionForPeer: (directQ?.isEmpty == false) ? directQ : nil,
@@ -1276,9 +1276,10 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
+        let sanitized = SpokenTextSanitizer.clean(raw)
         let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sentences = cleaned.components(separatedBy: ". ")
-        let compact = sentences.prefix(3).joined(separator: ". ")
+        let sentences = sanitized.components(separatedBy: ". ")
+        let compact = sentences.prefix(4).joined(separator: ". ")
         return DebateTurn(
             roundNumber: roundNumber,
             roundLabel: roundLabel,
@@ -1290,11 +1291,63 @@ public final class DebateOrchestrator: Sendable {
             provider: persona.provider,
             modelLabel: modelLabel,
             stance: defaultStance,
-            spokenTake: compact.isEmpty ? cleaned : compact,
+            spokenTake: compact.isEmpty ? sanitized : compact,
             thoughtProcess: cleaned,
             keyPoints: [],
             durationMs: durationMs
         )
+    }
+
+    /// Retroactively repairs any saved turn/verdict whose `spokenTake` accidentally stored raw JSON before the quote-repair parser.
+    @discardableResult
+    public static func healSessionIfNeeded(_ session: inout DebateSession) -> Bool {
+        var didChange = false
+        for idx in session.entries.indices {
+            switch session.entries[idx] {
+            case .turn(var t):
+                let trimmed = t.spokenTake.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("{") || trimmed.contains("\"spoken_take\"") {
+                    let source = t.thoughtProcess.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
+                        ? t.thoughtProcess
+                        : t.spokenTake
+                    if let json = JSONExtractor.parseObject(source) {
+                        if let sp = (json["spoken_take"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !sp.isEmpty {
+                            t.spokenTake = SpokenTextSanitizer.clean(sp)
+                            didChange = true
+                        }
+                        if let stRaw = (json["stance"] as? String)?.lowercased(), let st = StanceKind(rawValue: stRaw) {
+                            t.stance = st
+                        }
+                        if let notes = ((json["supporting_notes"] as? String) ?? (json["thought_process"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !notes.isEmpty {
+                            t.thoughtProcess = notes
+                        }
+                        if let pts = (json["key_points"] as? [String])?.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }).filter({ !$0.isEmpty }),
+                           !pts.isEmpty {
+                            t.keyPoints = pts
+                        }
+                        if let tools = (json["tools_used"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !tools.isEmpty {
+                            t.toolsActivitySummary = tools
+                        }
+                    } else {
+                        t.spokenTake = SpokenTextSanitizer.clean(t.spokenTake)
+                        didChange = true
+                    }
+                    session.entries[idx] = .turn(t)
+                }
+            case .verdict(var v):
+                let trimmed = v.spokenVerdict.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("{") || trimmed.contains("\"spoken_verdict\"") {
+                    v.spokenVerdict = SpokenTextSanitizer.clean(v.spokenVerdict)
+                    session.entries[idx] = .verdict(v)
+                    didChange = true
+                }
+            default:
+                break
+            }
+        }
+        return didChange
     }
 
     private func parseVerdict(raw: String, moderator: Persona, debaters: [Persona]) -> CosignVerdict {
@@ -1361,7 +1414,7 @@ public final class DebateOrchestrator: Sendable {
                 moderatorID: moderator.id,
                 moderatorName: moderator.name,
                 headline: headline,
-                spokenVerdict: spoken,
+                spokenVerdict: SpokenTextSanitizer.clean(spoken),
                 recommendation: rec,
                 actionSteps: steps,
                 keyTradeoffs: tradeoffs,
@@ -1376,11 +1429,12 @@ public final class DebateOrchestrator: Sendable {
         }
 
         let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeSpoken = SpokenTextSanitizer.clean(cleaned)
         return CosignVerdict(
             moderatorID: moderator.id,
             moderatorName: moderator.name,
             headline: "Panel Verdict",
-            spokenVerdict: String(cleaned.prefix(280)),
+            spokenVerdict: String(safeSpoken.prefix(280)),
             recommendation: cleaned,
             cosignedPersonaIDs: debaters.map(\.id),
             cosignedNames: debaters.map(\.name)

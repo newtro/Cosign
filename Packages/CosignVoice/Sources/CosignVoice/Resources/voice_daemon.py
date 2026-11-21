@@ -79,9 +79,16 @@ BREEZE_PRESETS: dict[str, dict] = {
 }
 
 _BRACKET_TAG_RE = re.compile(r"[\[\(](chuckle|laugh|sigh|clears? throat|cough|gasp|groan)[\]\)]", re.IGNORECASE)
+_SPOKEN_FIELD_RE = re.compile(r'"spoken_(?:take|verdict|intro)"\s*:\s*"((?:\\.|[^"\\])*)"', re.DOTALL)
 
 
 def normalize_breeze_cues(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("{") or '"spoken_take"' in stripped or '"spoken_verdict"' in stripped:
+        m = _SPOKEN_FIELD_RE.search(stripped)
+        if m:
+            stripped = m.group(1).replace('\\"', '"').replace("\\n", " ").strip()
+
     def _repl(match: re.Match) -> str:
         raw = match.group(1).lower()
         if raw in ("chuckle", "laugh"):
@@ -92,7 +99,7 @@ def normalize_breeze_cues(text: str) -> str:
             return "(cough)"
         return "(sigh)"
 
-    cleaned = _BRACKET_TAG_RE.sub(_repl, text)
+    cleaned = _BRACKET_TAG_RE.sub(_repl, stripped)
     return re.sub(r"  +", " ", cleaned).strip()
 
 

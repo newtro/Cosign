@@ -579,14 +579,15 @@ struct ExpressiveSpokenTextView: View {
     let showCues: Bool
 
     var body: some View {
+        let cleanText = SpokenTextSanitizer.clean(rawText)
         if !showCues {
-            Text(ExpressiveTagFormatter.stripTags(rawText))
+            Text(ExpressiveTagFormatter.stripTags(cleanText))
                 .font(.system(size: 15, weight: .regular))
                 .lineSpacing(5)
                 .foregroundStyle(StudioTheme.inkPrimary)
                 .textSelection(.enabled)
         } else {
-            let segments = ExpressiveTagFormatter.parseSegments(rawText)
+            let segments = ExpressiveTagFormatter.parseSegments(cleanText)
             segments.reduce(Text("")) { partial, seg in
                 switch seg {
                 case .words(let str):

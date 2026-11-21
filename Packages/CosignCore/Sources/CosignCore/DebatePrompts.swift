@@ -1,39 +1,330 @@
 import Foundation
 
 public enum JSONExtractor {
-    /// Extracts the outermost JSON object `{ ... }` from an LLM response even if wrapped in markdown fences or prose.
+    private static let knownTopLevelKeys: [String] = [
+        "session_title", "needs_interview", "spoken_intro", "questions",
+        "stance", "target_persona", "spoken_take", "direct_question_for_peer",
+        "supporting_notes", "thought_process", "key_points", "tools_used",
+        "headline", "spoken_verdict", "recommendation", "action_steps",
+        "key_tradeoffs", "cosigned_by", "dissents", "should_auto_execute",
+        "execution_assignments", "verification_passed", "issues_found",
+        "files_summary", "how_to_run"
+    ]
+
+    /// Extracts the outermost JSON object `{ ... }` from an LLM response even if wrapped in markdown fences,
+    /// containing unescaped interior quotes inside markdown values, or partially truncated.
     public static func parseObject(_ raw: String) -> [String: Any]? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let data = trimmed.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return obj
+        let unwrapped = unwrapOuterMarkdownFence(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+
+        // Tier 1: Fast strict parse
+        if let strict = parseStrictJSONObject(unwrapped) {
+            return strict
         }
 
-        if let fenceRange = trimmed.range(of: "```") {
-            let afterFence = trimmed[fenceRange.upperBound...]
-            if let endFence = afterFence.range(of: "```") {
-                var inner = String(afterFence[..<endFence.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if inner.lowercased().hasPrefix("json") {
-                    inner = String(inner.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Isolate outermost `{ ... }` slice
+        let candidateSlice: String
+        if let firstBrace = unwrapped.firstIndex(of: "{") {
+            if let lastBrace = unwrapped.lastIndex(of: "}"), firstBrace <= lastBrace {
+                candidateSlice = String(unwrapped[firstBrace...lastBrace])
+            } else {
+                candidateSlice = String(unwrapped[firstBrace...])
+            }
+        } else {
+            return nil
+        }
+
+        if let strictSlice = parseStrictJSONObject(candidateSlice) {
+            return strictSlice
+        }
+
+        // Tier 2: State-machine repair for unescaped interior quotes (e.g. `"Run the world"` inside markdown) & literal newlines
+        let repaired = repairUnescapedQuotesAndNewlines(candidateSlice)
+        if let parsedRepaired = parseStrictJSONObject(repaired) {
+            return parsedRepaired
+        }
+
+        // Tier 3: Field-by-field anchor extraction fallback (handles truncated JSON or severe syntax quirks)
+        let fallback = extractKnownFieldsFallback(candidateSlice)
+        return fallback.isEmpty ? nil : fallback
+    }
+
+    private static func unwrapOuterMarkdownFence(_ text: String) -> String {
+        guard text.hasPrefix("```") else { return text }
+        guard let firstNewline = text.firstIndex(of: "\n") else { return text }
+        var body = String(text[text.index(after: firstNewline)...])
+        if let closingFence = body.range(of: "```", options: .backwards) {
+            let trailing = body[closingFence.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if trailing.isEmpty {
+                body = String(body[..<closingFence.lowerBound])
+            }
+        }
+        return body.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func parseStrictJSONObject(_ text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return obj
+    }
+
+    private enum ContainerKind {
+        case objectExpectingKey
+        case objectExpectingColon
+        case objectExpectingValue
+        case arrayExpectingValue
+    }
+
+    /// Repairs unescaped `"` characters and raw control newlines inside JSON string values using structural lookahead.
+    public static func repairUnescapedQuotesAndNewlines(_ input: String) -> String {
+        let chars = Array(input)
+        let count = chars.count
+        var out: [Character] = []
+        out.reserveCapacity(count + 64)
+
+        var stack: [ContainerKind] = []
+        var inString = false
+        var stringIsKey = false
+        var escaped = false
+        var i = 0
+
+        func nextNonWhitespaceIndex(from start: Int) -> Int? {
+            var idx = start
+            while idx < count {
+                let c = chars[idx]
+                if c != " " && c != "\t" && c != "\r" && c != "\n" {
+                    return idx
                 }
-                if let data = inner.data(using: .utf8),
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    return obj
+                idx += 1
+            }
+            return nil
+        }
+
+        while i < count {
+            let ch = chars[i]
+
+            if inString {
+                if escaped {
+                    out.append(ch)
+                    escaped = false
+                    i += 1
+                    continue
+                }
+                if ch == "\\" {
+                    out.append(ch)
+                    escaped = true
+                    i += 1
+                    continue
+                }
+                if ch == "\n" {
+                    out.append("\\")
+                    out.append("n")
+                    i += 1
+                    continue
+                }
+                if ch == "\r" {
+                    i += 1
+                    continue
+                }
+                if ch == "\t" {
+                    out.append("\\")
+                    out.append("t")
+                    i += 1
+                    continue
+                }
+                if ch == "\"" {
+                    let isClosingQuote: Bool
+                    if let nextIdx = nextNonWhitespaceIndex(from: i + 1) {
+                        let nextCh = chars[nextIdx]
+                        if stringIsKey {
+                            isClosingQuote = (nextCh == ":")
+                        } else if stack.last == .arrayExpectingValue {
+                            if nextCh == "]" {
+                                isClosingQuote = true
+                            } else if nextCh == "," {
+                                if let afterCommaIdx = nextNonWhitespaceIndex(from: nextIdx + 1) {
+                                    let ac = chars[afterCommaIdx]
+                                    isClosingQuote = (ac == "\"" || ac == "{" || ac == "[" || ac == "]" || ac == "t" || ac == "f" || ac == "n" || ac == "-" || ac.isNumber)
+                                } else {
+                                    isClosingQuote = true
+                                }
+                            } else {
+                                isClosingQuote = false
+                            }
+                        } else {
+                            // Inside an object string value: valid closers are `}` or `,` followed by `"next_key"` (or `}`)
+                            if nextCh == "}" {
+                                isClosingQuote = true
+                            } else if nextCh == "," {
+                                if let afterCommaIdx = nextNonWhitespaceIndex(from: nextIdx + 1) {
+                                    let ac = chars[afterCommaIdx]
+                                    isClosingQuote = (ac == "\"" || ac == "}")
+                                } else {
+                                    isClosingQuote = true
+                                }
+                            } else {
+                                isClosingQuote = false
+                            }
+                        }
+                    } else {
+                        isClosingQuote = true
+                    }
+
+                    if isClosingQuote {
+                        out.append("\"")
+                        inString = false
+                        if stringIsKey, !stack.isEmpty {
+                            stack[stack.count - 1] = .objectExpectingColon
+                        }
+                    } else {
+                        out.append("\\")
+                        out.append("\"")
+                    }
+                    i += 1
+                    continue
+                }
+
+                out.append(ch)
+                i += 1
+                continue
+            }
+
+            // Outside string
+            switch ch {
+            case "{":
+                stack.append(.objectExpectingKey)
+                out.append(ch)
+            case "}":
+                if !stack.isEmpty { stack.removeLast() }
+                out.append(ch)
+            case "[":
+                stack.append(.arrayExpectingValue)
+                out.append(ch)
+            case "]":
+                if !stack.isEmpty { stack.removeLast() }
+                out.append(ch)
+            case ":":
+                if stack.last == .objectExpectingColon {
+                    stack[stack.count - 1] = .objectExpectingValue
+                }
+                out.append(ch)
+            case ",":
+                if stack.last == .objectExpectingValue {
+                    stack[stack.count - 1] = .objectExpectingKey
+                }
+                out.append(ch)
+            case "\"":
+                inString = true
+                stringIsKey = (stack.last == .objectExpectingKey)
+                out.append(ch)
+            default:
+                out.append(ch)
+            }
+            i += 1
+        }
+
+        return String(out)
+    }
+
+    private static func extractKnownFieldsFallback(_ text: String) -> [String: Any] {
+        let ns = text as NSString
+        var keyPositions: [(key: String, keyStart: Int, valueStart: Int)] = []
+
+        for key in knownTopLevelKeys {
+            let pattern = "\"\(NSRegularExpression.escapedPattern(for: key))\"\\s*:\\s*"
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                keyPositions.append((key: key, keyStart: match.range.location, valueStart: match.range.location + match.range.length))
+            }
+        }
+
+        keyPositions.sort { $0.keyStart < $1.keyStart }
+        guard !keyPositions.isEmpty else { return [:] }
+
+        var result: [String: Any] = [:]
+        for (idx, item) in keyPositions.enumerated() {
+            let endLimit = (idx + 1 < keyPositions.count) ? keyPositions[idx + 1].keyStart : ns.length
+            guard item.valueStart < endLimit else { continue }
+            var rawVal = ns.substring(with: NSRange(location: item.valueStart, length: endLimit - item.valueStart))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Strip trailing `,` or closing `}` at object boundary
+            while rawVal.hasSuffix(",") || rawVal.hasSuffix("}") {
+                rawVal.removeLast()
+                rawVal = rawVal.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            if rawVal.hasPrefix("\"") {
+                rawVal.removeFirst()
+                if rawVal.hasSuffix("\"") {
+                    rawVal.removeLast()
+                }
+                result[item.key] = unescapeJSONString(rawVal)
+            } else if rawVal == "true" || rawVal == "false" {
+                result[item.key] = (rawVal == "true")
+            } else if rawVal.hasPrefix("["),
+                      let arrData = rawVal.data(using: .utf8),
+                      let arr = try? JSONSerialization.jsonObject(with: arrData) {
+                result[item.key] = arr
+            }
+        }
+        return result
+    }
+
+    public static func unescapeJSONString(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\\\"", with: "\"")
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: "\\t", with: "\t")
+            .replacingOccurrences(of: "\\r", with: "")
+            .replacingOccurrences(of: "\\\\", with: "\\")
+    }
+}
+
+public enum SpokenTextSanitizer {
+    /// Guarantees raw JSON keys (like `"stance"` or `"spoken_take"`) are NEVER shown in a spoken bubble or read aloud by TTS.
+    public static func clean(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        let looksLikeJSON = trimmed.hasPrefix("{")
+            || trimmed.hasPrefix("```")
+            || trimmed.contains("\"spoken_take\"")
+            || trimmed.contains("\"spoken_verdict\"")
+            || trimmed.contains("\"spoken_intro\"")
+
+        if looksLikeJSON {
+            if let parsed = JSONExtractor.parseObject(trimmed) {
+                for key in ["spoken_take", "spoken_verdict", "spoken_intro", "headline", "recommendation"] {
+                    if let val = (parsed[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !val.isEmpty,
+                       !val.hasPrefix("{") {
+                        return val
+                    }
+                }
+            }
+
+            // Regex emergency extraction if string was mid-stream or truncated before closing quote
+            let patterns = [
+                #""spoken_(?:take|verdict|intro)"\s*:\s*"((?:\\.|[^"\\])*)"#,
+                #""headline"\s*:\s*"((?:\\.|[^"\\])*)"#
+            ]
+            let ns = trimmed as NSString
+            for pat in patterns {
+                if let re = try? NSRegularExpression(pattern: pat),
+                   let m = re.firstMatch(in: trimmed, range: NSRange(location: 0, length: ns.length)),
+                   m.numberOfRanges > 1 {
+                    let captured = JSONExtractor.unescapeJSONString(ns.substring(with: m.range(at: 1)))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !captured.isEmpty {
+                        return captured
+                    }
                 }
             }
         }
 
-        guard let firstBrace = trimmed.firstIndex(of: "{"),
-              let lastBrace = trimmed.lastIndex(of: "}"),
-              firstBrace <= lastBrace else {
-            return nil
-        }
-        let slice = String(trimmed[firstBrace...lastBrace])
-        if let data = slice.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return obj
-        }
-        return nil
+        return trimmed
     }
 }
 

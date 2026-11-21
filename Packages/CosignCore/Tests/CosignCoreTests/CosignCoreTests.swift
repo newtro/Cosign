@@ -562,4 +562,56 @@ final class CosignCoreTests: XCTestCase {
         XCTAssertEqual(verdict?.buildReport?.verifierName, "Sable")
         XCTAssertEqual(verdict?.buildReport?.howToRun, "python3 md2html.py input.md")
     }
+
+    func testUnescapedInteriorQuotesRepairAndSessionHealing() {
+        // Reproduces Orion's exact failure: unescaped quotes inside markdown backticks in `supporting_notes`
+        let malformedRaw = """
+        {
+          "stance": "building",
+          "spoken_take": "Marcus, Sable, treat this Fellowship build like a stage spotlight. (laugh) Match by label instead of hardcoded indices.",
+          "supporting_notes": "Keep `"Run the world (DM)"` selected while calling `ApplyServerChoice()`.",
+          "key_points": ["Reversible config", "Protocol 62"],
+          "tools_used": "Inspected NetBootstrap.cs"
+        }
+        """
+
+        let parsed = JSONExtractor.parseObject(malformedRaw)
+        XCTAssertEqual(parsed?["stance"] as? String, "building")
+        XCTAssertEqual(
+            parsed?["spoken_take"] as? String,
+            "Marcus, Sable, treat this Fellowship build like a stage spotlight. (laugh) Match by label instead of hardcoded indices."
+        )
+        XCTAssertTrue((parsed?["supporting_notes"] as? String)?.contains("\"Run the world (DM)\"") == true)
+        XCTAssertEqual((parsed?["key_points"] as? [String])?.count, 2)
+
+        // Verify retroactive healing on an already-saved broken turn
+        let brokenTurn = DebateTurn(
+            roundNumber: 1,
+            roundLabel: "Build Huddle",
+            personaID: DefaultRoster.orionID,
+            personaName: "Orion",
+            personaTitle: "The Lateral Thinker",
+            avatarSymbol: "sparkles",
+            accentHex: "#60A5FA",
+            provider: .agy,
+            modelLabel: "Gemini 4 Neon",
+            stance: .building,
+            spokenTake: "{\n  \"stance\": \"building\",\n  \"spoken_take\": \"Marcus, Sable, treat this Fellowship build",
+            thoughtProcess: malformedRaw
+        )
+        var session = DebateSession(
+            moderatorID: DefaultRoster.veraID,
+            debaterIDs: [DefaultRoster.orionID],
+            entries: [.turn(brokenTurn)]
+        )
+        XCTAssertTrue(DebateOrchestrator.healSessionIfNeeded(&session))
+        if case .turn(let healed) = session.entries[0] {
+            XCTAssertFalse(healed.spokenTake.contains("\"stance\""))
+            XCTAssertFalse(healed.spokenTake.hasPrefix("{"))
+            XCTAssertTrue(healed.spokenTake.hasPrefix("Marcus, Sable, treat this Fellowship build"))
+            XCTAssertEqual(healed.toolsActivitySummary, "Inspected NetBootstrap.cs")
+        } else {
+            XCTFail("Expected healed turn")
+        }
+    }
 }

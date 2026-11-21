@@ -83,6 +83,9 @@ final class AppModel: ObservableObject {
                 if copy.cliToolsEnabled == nil {
                     copy.cliToolsEnabled = true
                 }
+                if DebateOrchestrator.healSessionIfNeeded(&copy) {
+                    store.saveSession(copy)
+                }
                 return copy
             }
             self.selectedSessionID = self.sessions.first?.id

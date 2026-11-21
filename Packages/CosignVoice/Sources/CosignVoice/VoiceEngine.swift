@@ -170,7 +170,8 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
            ((try? FileManager.default.attributesOfItem(atPath: cachedURL.path)[.size] as? Int) ?? 0) > 1024 {
             return cachedURL
         }
-        let normalizedText = ExpressiveTagFormatter.normalizeForBreeze(item.spokenText)
+        let safeSpoken = SpokenTextSanitizer.clean(item.spokenText)
+        let normalizedText = ExpressiveTagFormatter.normalizeForBreeze(safeSpoken)
         let customPath = (item.persona.customVoicePath?.isEmpty == false) ? item.persona.customVoicePath : nil
         let client = daemonClient
         let ok = await client.synthesize(
@@ -324,8 +325,9 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     private func cachedAudioURL(for item: SpeechQueueItem) -> URL {
-        let normalized = ExpressiveTagFormatter.normalizeForBreeze(item.spokenText)
-        let keyString = "breeze2-v1|\(item.persona.voicePresetID)|\(item.persona.customVoicePath ?? "")|\(String(format: "%.2f", item.persona.voiceExaggeration))|\(normalized)"
+        let safeSpoken = SpokenTextSanitizer.clean(item.spokenText)
+        let normalized = ExpressiveTagFormatter.normalizeForBreeze(safeSpoken)
+        let keyString = "breeze2-v2|\(item.persona.voicePresetID)|\(item.persona.customVoicePath ?? "")|\(String(format: "%.2f", item.persona.voiceExaggeration))|\(normalized)"
         let digest = SHA256.hash(data: Data(keyString.utf8))
         let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
         return cacheDirectory.appendingPathComponent("breeze-\(hex).wav")

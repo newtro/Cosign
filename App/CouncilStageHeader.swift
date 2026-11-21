@@ -34,6 +34,19 @@ struct CouncilStageHeader: View {
                                 .lineLimit(1)
                         }
                         .transition(.opacity)
+                    } else if session.stage == .completed && !session.entries.isEmpty {
+                        let voiceBusy = model.voiceEngine.isPlaying || !model.voiceEngine.queuedItems.isEmpty
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(StudioTheme.emerald)
+                            Text(voiceBusy
+                                 ? "All AI steps finished · Voicing remaining audio"
+                                 : "Finished · All council steps complete")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(StudioTheme.emerald)
+                                .lineLimit(1)
+                        }
                     } else {
                         Text("\(session.activeMode.displayName) · \(debaters.count) Specialists + 1 Chair · Subscription CLIs")
                             .font(.system(size: 11.5, weight: .medium))
