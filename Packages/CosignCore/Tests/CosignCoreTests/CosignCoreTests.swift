@@ -460,30 +460,32 @@ final class CosignCoreTests: XCTestCase {
                   "tools_used": "Checked empty build folder"
                 }
                 """, durationMs: 30)
-            } else if req.systemPrompt.contains("CONCRETE MULTI-AGENT BUILD BLUEPRINT") {
+            } else if req.systemPrompt.contains("BUILD BLUEPRINT") {
                 return ModelCallResponse(rawText: """
                 {
                   "headline": "Build Zero-Dep Markdown CLI + Pytest Suite",
                   "spoken_verdict": "Marcus builds the parser and CLI, Orion writes the tests and README, then Sable runs QA.",
-                  "recommendation": "Two sequential workstreams followed by QA gate.",
+                  "recommendation": "Two parallel workstreams followed by QA gate.",
                   "action_steps": ["Implement parser", "Add tests"],
                   "cosigned_by": ["Marcus", "Orion", "Sable"],
                   "should_auto_execute": true,
                   "execution_assignments": [
                     {
                       "assigned_to": "Marcus",
+                      "wave": 1,
                       "task_instruction": "Create md2html.py",
                       "target_scope": "md2html.py"
                     },
                     {
                       "assigned_to": "Orion",
+                      "wave": 1,
                       "task_instruction": "Create test_md2html.py",
                       "target_scope": "test_md2html.py"
                     }
                   ]
                 }
                 """, durationMs: 35)
-            } else if req.systemPrompt.contains("ASSIGNED TASK:") {
+            } else if req.systemPrompt.contains("ASSIGNED TASK") {
                 XCTAssertEqual(req.toolPhase, .coordinatedReadWrite)
                 return ModelCallResponse(rawText: """
                 {
@@ -661,7 +663,7 @@ final class CosignCoreTests: XCTestCase {
                 return ModelCallResponse(rawText: """
                 {"stance": "building", "spoken_take": "Let's wire character prefabs and onboarding hints.", "supporting_notes": "Plan"}
                 """, durationMs: 10)
-            } else if req.systemPrompt.contains("CONCRETE MULTI-AGENT BUILD BLUEPRINT") {
+            } else if req.systemPrompt.contains("BUILD BLUEPRINT") {
                 return ModelCallResponse(rawText: """
                 {
                   "headline": "Ship Night One Visuals & Onboarding",
@@ -673,13 +675,14 @@ final class CosignCoreTests: XCTestCase {
                   "execution_assignments": [
                     {
                       "assigned_to": "Ember",
+                      "wave": 1,
                       "task_instruction": "Stage prefabs and wire StreetKit",
                       "target_scope": "StreetKit.cs"
                     }
                   ]
                 }
                 """, durationMs: 15)
-            } else if req.systemPrompt.contains("ASSIGNED TASK:") {
+            } else if req.systemPrompt.contains("ASSIGNED TASK") {
                 return ModelCallResponse(rawText: """
                 {"stance": "executing", "spoken_take": "Staged prefabs.", "supporting_notes": "Initial pass"}
                 """, durationMs: 15)
@@ -873,5 +876,121 @@ final class CosignCoreTests: XCTestCase {
             return false
         }
         XCTAssertTrue(round4BannerExists)
+    }
+
+    func testParallelWaveExecutionAndScopeCollisionGuard() async throws {
+        // 1. Verify scope collision detector separates overlapping paths and groups disjoint paths
+        let disjointAndColliding = [
+            ExecutionAssignment(assignedPersonaName: "Forge", taskInstruction: "Build server", targetScope: "Server/Engine", wave: 1),
+            ExecutionAssignment(assignedPersonaName: "Ember", taskInstruction: "Build UI", targetScope: "Client/UI", wave: 1),
+            ExecutionAssignment(assignedPersonaName: "Rook", taskInstruction: "Build tests", targetScope: "Tests/Unit", wave: 1),
+            // Accidental duplicate scope inside Wave 1 must automatically shift into a subsequent sub-wave!
+            ExecutionAssignment(assignedPersonaName: "Ember", taskInstruction: "Tweak HUD", targetScope: "Client/UI/Hud.cs", wave: 1),
+            ExecutionAssignment(assignedPersonaName: "Forge", taskInstruction: "Wire app", targetScope: "Integration/Bootstrap.cs", wave: 2),
+        ]
+        let partitioned = DebateOrchestrator.partitionIntoParallelWaves(disjointAndColliding)
+        XCTAssertEqual(partitioned.count, 3)
+        XCTAssertEqual(partitioned[0].items.count, 3) // Server/Engine + Client/UI + Tests/Unit in parallel!
+        XCTAssertEqual(partitioned[1].items.count, 1) // Client/UI/Hud.cs safely shifted out of Wave 1
+        XCTAssertEqual(partitioned[2].items.count, 1) // Explicit Wave 2 runs last
+
+        // 2. Verify real concurrent execution across 3 personas in Wave 1 before Wave 2 starts
+        let allPersonas = DefaultRoster.personas
+        let moderator = allPersonas.first { $0.id == DefaultRoster.atlasID }!
+        let debaters = [
+            allPersonas.first { $0.id == DefaultRoster.forgeID }!,
+            allPersonas.first { $0.id == DefaultRoster.emberID }!,
+            allPersonas.first { $0.id == DefaultRoster.rookID }!,
+        ]
+        let tempBuildDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-parallel-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempBuildDir) }
+
+        struct ConcurrencyTracker {
+            var currentInFlight = 0
+            var maxInFlight = 0
+            var wave1CompletedCount = 0
+            var wave2SawCompletedWave1Count = 0
+            var maxActiveThinkerBadgeCount = 0
+        }
+        let tracker = LockedBox(ConcurrencyTracker())
+
+        let runner = FakeModelRunner { req in
+            if req.systemPrompt.contains("BUILD MODE INTAKE") {
+                return ModelCallResponse(rawText: #"{"session_title":"Parallel Build","needs_interview":false,"questions":[]}"#, durationMs: 5)
+            } else if req.systemPrompt.contains("WORKSTREAM HUDDLE") {
+                return ModelCallResponse(rawText: #"{"stance":"building","spoken_take":"Modular slices ready.","supporting_notes":"OK"}"#, durationMs: 5)
+            } else if req.systemPrompt.contains("BUILD BLUEPRINT") {
+                return ModelCallResponse(rawText: """
+                {
+                  "headline": "Parallel Three-Way Wave Build",
+                  "spoken_verdict": "Forge, Ember, and Rook build Wave 1 in parallel, then Forge integrates Wave 2.",
+                  "recommendation": "Wave 1 parallel + Wave 2 integration.",
+                  "action_steps": ["Wave 1 slices", "Wave 2 wiring"],
+                  "cosigned_by": ["Forge", "Ember", "Rook"],
+                  "should_auto_execute": true,
+                  "execution_assignments": [
+                    {"assigned_to": "Forge", "wave": 1, "task_instruction": "Build Server/", "target_scope": "Server/"},
+                    {"assigned_to": "Ember", "wave": 1, "task_instruction": "Build Client/", "target_scope": "Client/"},
+                    {"assigned_to": "Rook", "wave": 1, "task_instruction": "Build Tests/", "target_scope": "Tests/"},
+                    {"assigned_to": "Forge", "wave": 2, "task_instruction": "Wire Integration/", "target_scope": "Integration/"}
+                  ]
+                }
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("ASSIGNED TASK") {
+                let isWave1 = req.systemPrompt.contains("(WAVE 1)")
+                if isWave1 {
+                    XCTAssertTrue(req.systemPrompt.contains("PARALLEL COUNCIL WAVE ACTIVE"))
+                    XCTAssertTrue(req.systemPrompt.contains("SUB-AGENTS UNLOCKED"))
+                }
+                tracker.withLock { st in
+                    st.currentInFlight += 1
+                    st.maxInFlight = max(st.maxInFlight, st.currentInFlight)
+                    if !isWave1 {
+                        st.wave2SawCompletedWave1Count = st.wave1CompletedCount
+                    }
+                }
+                try await Task.sleep(nanoseconds: 60_000_000) // 60ms overlap window so all 3 Wave-1 tasks are in flight together
+                tracker.withLock { st in
+                    st.currentInFlight -= 1
+                    if isWave1 {
+                        st.wave1CompletedCount += 1
+                    }
+                }
+                return ModelCallResponse(rawText: #"{"stance":"executing","spoken_take":"Slice built with sub-agents.","supporting_notes":"Done"}"#, durationMs: 60)
+            } else if req.systemPrompt.contains("ADVERSARIAL QA") {
+                return ModelCallResponse(rawText: #"{"stance":"verifying","verification_passed":true,"spoken_take":"All green.","how_to_run":"swift test"}"#, durationMs: 10)
+            }
+            return ModelCallResponse(rawText: "{}", durationMs: 5)
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        let session = DebateSession(
+            moderatorID: moderator.id,
+            debaterIDs: debaters.map(\.id),
+            mode: .build,
+            hasExplicitBuildFolder: true,
+            completenessReviewEnabled: false,
+            workspacePath: tempBuildDir.path
+        )
+
+        let finished = try await orchestrator.submitUserMessage(
+            text: "Build Server, Client, and Tests in parallel, then wire Integration.",
+            into: session,
+            moderator: moderator,
+            debaters: debaters,
+            allPersonas: allPersonas
+        ) { event in
+            if case .activeThinkersChanged(let ids, _) = event {
+                tracker.withLock { st in
+                    st.maxActiveThinkerBadgeCount = max(st.maxActiveThinkerBadgeCount, ids.count)
+                }
+            }
+        }
+
+        XCTAssertEqual(finished.stage, .completed)
+        let snapshot = tracker.withLock { $0 }
+        XCTAssertEqual(snapshot.maxInFlight, 3, "Expected all 3 Wave-1 personas to execute simultaneously")
+        XCTAssertEqual(snapshot.wave2SawCompletedWave1Count, 3, "Expected Wave 2 to start only after all 3 Wave-1 tasks finished")
+        XCTAssertGreaterThanOrEqual(snapshot.maxActiveThinkerBadgeCount, 3)
     }
 }

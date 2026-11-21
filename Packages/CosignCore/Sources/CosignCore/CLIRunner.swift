@@ -74,8 +74,8 @@ public protocol ModelRunnerProtocol: Sendable {
 /// Runs headless calls through subscription CLIs (`claude`, `codex`, `agy`) and optional OpenRouter.
 /// Supports three tool modes:
 /// - `.closedBook`: isolated no-tool reasoning
-/// - `.researchAndInspect`: full CLI read/inspection tools (local repos, `git`, `gh`, MCP, web) with file edits blocked
-/// - `.coordinatedReadWrite`: full read + write + shell execution (used one persona at a time under Chair coordination)
+/// - `.researchAndInspect`: full CLI read/inspection tools + read-only sub-agents (`git`, `gh`, MCP, web) with file edits blocked
+/// - `.coordinatedReadWrite`: full read + write + shell + native sub-agents (supports parallel disjoint-scope waves)
 public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
     private let realHome: URL
     private let maxRetries: Int
@@ -175,7 +175,6 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
             "--model", effectiveModel,
             "--effort", effectiveEffort,
             "--output-format", "json",
-            "--system-prompt", req.systemPrompt,
             "--disable-slash-commands",
             "--no-session-persistence",
         ]
@@ -183,12 +182,20 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         switch req.toolPhase {
         case .closedBook:
             let tools = req.allowWebSearch ? "WebSearch,WebFetch" : ""
-            args += ["--tools", tools, "--safe-mode", "--setting-sources", "", "--strict-mcp-config"]
+            args += [
+                "--system-prompt", req.systemPrompt,
+                "--tools", tools,
+                "--safe-mode",
+                "--setting-sources", "",
+                "--strict-mcp-config",
+            ]
             if req.allowWebSearch {
                 args += ["--allowedTools", tools]
             }
         case .researchAndInspect:
+            // Use --append-system-prompt so Claude Code preserves its native built-in Agent/sub-agent & parallel tool orchestration!
             args += [
+                "--append-system-prompt", req.systemPrompt,
                 "--tools", "default",
                 "--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit",
                 "--dangerously-skip-permissions",
@@ -197,7 +204,9 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
                 args += ["--add-dir", extra]
             }
         case .coordinatedReadWrite:
+            // Preserve Claude Code's built-in Agent/sub-agent harness so each builder can spawn sub-agents freely!
             args += [
+                "--append-system-prompt", req.systemPrompt,
                 "--tools", "default",
                 "--dangerously-skip-permissions",
             ]
@@ -263,13 +272,16 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
                 fullPrompt += "\n\nDo not use any tools, files, or web search for this reply."
             }
         case .researchAndInspect:
-            fullPrompt += "\n\nTOOL ACCESS: You have full read/research access to local repos (working directory: \(cwd.path)), `git`, `gh` (GitHub CLI), MCP servers, and web search. STRICT RULE FOR THIS DEBATE TURN: Do NOT edit, write, create, or delete any files—only inspect, read, and research."
+            fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read/research access to local repos (working directory: \(cwd.path)), `git`, `gh` (GitHub CLI), MCP servers, web search, and parallel read-only sub-agents. STRICT RULE FOR THIS TURN: Do NOT edit, write, create, or delete any files—only inspect, read, and research."
         case .coordinatedReadWrite:
-            fullPrompt += "\n\nTOOL ACCESS: You are the Chair-designated executor for this turn with full read + write + shell access in \(cwd.path)."
+            fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read + write + shell access in \(cwd.path) AND full freedom to spawn your own sub-agents and parallel tool calls to divide & conquer your assigned scope rapidly. Stay strictly within your assigned file/directory scope so concurrent council teammates are never disrupted."
         }
 
         let effortValue = req.effort == .max ? "xhigh" : req.effort.rawValue
         var args: [String] = []
+        if req.toolPhase != .closedBook {
+            args += ["--enable", "multi_agent_v2"]
+        }
         if req.allowWebSearch || req.toolPhase != .closedBook {
             args.append("--search")
         }
@@ -325,9 +337,9 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
                 fullPrompt += "\n\nDo not use any tools, files, or web search for this reply."
             }
         case .researchAndInspect:
-            fullPrompt += "\n\nTOOL ACCESS: You have full read/inspection access to local repos (working directory: \(cwd.path)), `git`, `gh` (GitHub CLI), and web search. Do NOT edit or modify files during this debate turn."
+            fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read/inspection access to local repos (working directory: \(cwd.path)), `git`, `gh` (GitHub CLI), web search, and read-only `research` sub-agents (`invoke_subagent`). Do NOT edit or modify files during this turn."
         case .coordinatedReadWrite:
-            fullPrompt += "\n\nTOOL ACCESS: You are the Chair-designated executor for this turn with full read + write + command access in \(cwd.path)."
+            fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read + write + command access in \(cwd.path) AND full freedom to spawn sub-agents (`invoke_subagent` / `define_subagent`) and parallel tool calls to parallelize sub-tasks within your assigned scope."
         }
 
         var args = [

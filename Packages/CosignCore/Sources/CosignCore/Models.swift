@@ -501,17 +501,25 @@ public struct ExecutionAssignment: Identifiable, Codable, Hashable, Sendable {
     public var assignedPersonaName: String
     public var taskInstruction: String
     public var targetScope: String
+    /// 1-based execution wave index. Assignments in the same wave with disjoint scopes run in parallel!
+    public var wave: Int?
+
+    public var effectiveWave: Int {
+        max(1, wave ?? 1)
+    }
 
     public init(
         id: UUID = UUID(),
         assignedPersonaName: String,
         taskInstruction: String,
-        targetScope: String = ""
+        targetScope: String = "",
+        wave: Int? = nil
     ) {
         self.id = id
         self.assignedPersonaName = assignedPersonaName
         self.taskInstruction = taskInstruction
         self.targetScope = targetScope
+        self.wave = wave
     }
 }
 
@@ -731,7 +739,8 @@ public enum HandoffPromptBuilder {
         if includeFileAssignments, let assignments = verdict.executionAssignments, !assignments.isEmpty {
             out.append("## Detailed File & Module Breakdown")
             for (idx, item) in assignments.enumerated() {
-                out.append("### Workstream \(idx + 1)")
+                let waveTag = item.wave.map { " · Wave \($0)" } ?? ""
+                out.append("### Workstream \(idx + 1) (\(item.assignedPersonaName)\(waveTag))")
                 if !item.targetScope.isEmpty {
                     out.append("- **Target Files / Scope:** `\(item.targetScope)`")
                 }

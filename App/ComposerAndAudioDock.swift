@@ -117,7 +117,7 @@ struct EmptyCouncilWelcomeView: View {
                     .foregroundStyle(StudioTheme.inkPrimary)
 
                 Text(isBuild
-                     ? "Pick or create a local folder. The council aligns on architecture, executes workstreams,\nruns QA tests, and loops with your Completeness Reviewer until 100% of requirements are met."
+                     ? "Pick or create a local folder. The council aligns on architecture, executes parallel workstreams\nwith sub-agents, runs QA tests, and loops with your Completeness Reviewer to 100%."
                      : "Pitch a rough spark or tough decision. The panel will interview you on what's missing,\ndebate it aloud in compact turns, and deliver a Co-Signed Verdict.")
                     .font(.system(size: 13.5))
                     .lineSpacing(3.5)

@@ -372,64 +372,38 @@ public final class DebateOrchestrator: Sendable {
             ]
         }
 
+        let initialWaves = Self.partitionIntoParallelWaves(assignments, workspaceRoot: targetFolder)
+        let hasParallelWave = initialWaves.contains { $0.items.count > 1 }
         session.stage = .executingPlan
         session.entries.append(.roundBanner(RoundBanner(
             roundNumber: 98,
-            title: "Build Phase · Multi-Agent Implementation (\(folderName))",
-            subtitle: "\(moderator.name) is coordinating \(assignments.count) sequential workstreams inside \(targetFolder)"
+            title: hasParallelWave
+                ? "Build Phase · Parallel Multi-Agent Waves (\(folderName))"
+                : "Build Phase · Multi-Agent Implementation (\(folderName))",
+            subtitle: "\(moderator.name) dispatched \(assignments.count) workstream\(assignments.count == 1 ? "" : "s") across \(initialWaves.count) wave\(initialWaves.count == 1 ? "" : "s") (sub-agents unlocked)"
         )))
         await onEvent(.sessionUpdated(session))
 
         let allCouncil = [moderator] + debaters
-        for (idx, assignment) in assignments.enumerated() {
-            try Task.checkCancellation()
-            let executor = allCouncil.first {
-                $0.name.localizedCaseInsensitiveContains(assignment.assignedPersonaName)
-                || assignment.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
-            } ?? selectPrimaryBuilder(from: debaters, excluding: nil, fallback: moderator)
-
-            await onEvent(.activeThinkersChanged(
-                [executor.id],
-                statusLabel: "Workstream \(idx + 1)/\(assignments.count): \(executor.name) is building in \(folderName)…"
-            ))
-
-            let liveContext = buildTranscriptContext(for: session)
-            let resp = try await runner.call(ModelCallRequest(
-                provider: executor.provider,
-                modelID: executor.modelID,
-                effort: executor.effort,
-                systemPrompt: DebatePrompts.coordinatedExecutionSystemPrompt(
-                    executor: executor,
-                    moderatorName: moderator.name,
-                    assignment: assignment,
-                    workspacePath: targetFolder
-                ),
-                userPrompt: liveContext,
-                allowWebSearch: session.allowWebSearch,
-                toolPhase: .coordinatedReadWrite,
-                workspacePath: targetFolder,
-                openRouterAPIKey: openRouterKey
-            ))
-
-            let execTurn = parseDebateTurn(
-                raw: resp.rawText,
-                durationMs: resp.durationMs,
-                roundNumber: 98,
-                roundLabel: "Workstream \(idx + 1)/\(assignments.count)",
-                persona: executor,
-                modelLabel: modelLabels[executor.modelID] ?? executor.modelID,
-                defaultStance: .executing
-            )
-            session.entries.append(.turn(execTurn))
-            session.updatedAt = Date()
-            await onEvent(.sessionUpdated(session))
-            await onEvent(.enqueueSpeech(SpeechQueueItem(
-                id: execTurn.id,
-                persona: executor,
-                spokenText: execTurn.spokenTake,
-                contextLabel: "Built · \(executor.name)"
-            )))
-        }
+        var initialFilesSummary: [String] = []
+        var initialHowToRun: String = ""
+        session = try await runExecutionWaves(
+            waves: initialWaves,
+            into: session,
+            moderator: moderator,
+            allCouncil: allCouncil,
+            debaters: debaters,
+            excludingBuilder: nil,
+            reviewerNameForRemediation: nil,
+            remediationPassIndex: nil,
+            targetFolder: targetFolder,
+            folderName: folderName,
+            modelLabels: modelLabels,
+            openRouterKey: openRouterKey,
+            filesSummary: &initialFilesSummary,
+            howToRun: &initialHowToRun,
+            onEvent: onEvent
+        )
 
         // --- ADVERSARIAL QA & VERIFICATION GATE ---
         try Task.checkCancellation()
@@ -466,8 +440,12 @@ public final class DebateOrchestrator: Sendable {
         let qaJSON = JSONExtractor.parseObject(qaResp.rawText)
         var verificationPassed = (qaJSON?["verification_passed"] as? Bool) ?? true
         let issuesFound = (qaJSON?["issues_found"] as? [String])?.filter { !$0.isEmpty } ?? []
-        var filesSummary = (qaJSON?["files_summary"] as? [String])?.filter { !$0.isEmpty } ?? []
-        var howToRun = (qaJSON?["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var filesSummary = initialFilesSummary
+        for f in ((qaJSON?["files_summary"] as? [String])?.filter { !$0.isEmpty } ?? []) where !filesSummary.contains(f) {
+            filesSummary.append(f)
+        }
+        let qaRun = (qaJSON?["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var howToRun = qaRun.isEmpty ? initialHowToRun : qaRun
 
         let qaTurn = parseDebateTurn(
             raw: qaResp.rawText,
@@ -719,15 +697,17 @@ public final class DebateOrchestrator: Sendable {
                 var remAssignments: [ExecutionAssignment] = []
                 if let remPlanJSON = JSONExtractor.parseObject(remPlanResp.rawText),
                    let rawAssign = remPlanJSON["execution_assignments"] as? [[String: Any]] {
-                    for item in rawAssign.prefix(4) {
+                    for item in rawAssign.prefix(8) {
                         guard let who = (item["assigned_to"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                               let instr = (item["task_instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                               !who.isEmpty, !instr.isEmpty else { continue }
                         let scope = (item["target_scope"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let wave = Self.parseWave(item["wave"])
                         remAssignments.append(ExecutionAssignment(
                             assignedPersonaName: who,
                             taskInstruction: instr,
-                            targetScope: scope
+                            targetScope: scope,
+                            wave: wave
                         ))
                     }
                 }
@@ -738,84 +718,33 @@ public final class DebateOrchestrator: Sendable {
                         ExecutionAssignment(
                             assignedPersonaName: defaultBuilder.name,
                             taskInstruction: "Resolve all completeness gaps flagged by \(reviewer.name):\n\(joinedMissing)",
-                            targetScope: targetFolder
+                            targetScope: targetFolder,
+                            wave: 1
                         )
                     ]
                 }
 
+                let remWaves = Self.partitionIntoParallelWaves(remAssignments, workspaceRoot: targetFolder)
                 session.stage = .executingPlan
                 await onEvent(.sessionUpdated(session))
 
-                for (rIdx, remTask) in remAssignments.enumerated() {
-                    try Task.checkCancellation()
-                    let executor = allCouncil.first {
-                        $0.name.localizedCaseInsensitiveContains(remTask.assignedPersonaName)
-                        || remTask.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
-                    } ?? selectPrimaryBuilder(from: debaters, excluding: reviewer, fallback: moderator)
-
-                    await onEvent(.activeThinkersChanged(
-                        [executor.id],
-                        statusLabel: "Remediation \(passIndex) (\(rIdx + 1)/\(remAssignments.count)): \(executor.name) is completing missed items…"
-                    ))
-
-                    let remExecResp = try await runner.call(ModelCallRequest(
-                        provider: executor.provider,
-                        modelID: executor.modelID,
-                        effort: executor.effort,
-                        systemPrompt: DebatePrompts.completenessRemediationExecutionPrompt(
-                            executor: executor,
-                            moderatorName: moderator.name,
-                            reviewerName: reviewer.name,
-                            assignment: remTask,
-                            workspacePath: targetFolder
-                        ),
-                        userPrompt: buildTranscriptContext(for: session),
-                        allowWebSearch: session.allowWebSearch,
-                        toolPhase: .coordinatedReadWrite,
-                        workspacePath: targetFolder,
-                        openRouterAPIKey: openRouterKey
-                    ))
-
-                    var remExecTurn = parseDebateTurn(
-                        raw: remExecResp.rawText,
-                        durationMs: remExecResp.durationMs,
-                        roundNumber: 110 + passIndex,
-                        roundLabel: "Remediation \(passIndex) · \(rIdx + 1)/\(remAssignments.count)",
-                        persona: executor,
-                        modelLabel: modelLabels[executor.modelID] ?? executor.modelID,
-                        defaultStance: .executing
-                    )
-
-                    if let remExecJSON = JSONExtractor.parseObject(remExecResp.rawText) {
-                        if let updatedFiles = (remExecJSON["files_summary"] as? [String])?.filter({ !$0.isEmpty }) {
-                            for f in updatedFiles where !filesSummary.contains(f) {
-                                filesSummary.append(f)
-                            }
-                        }
-                        if let updatedRun = (remExecJSON["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                           !updatedRun.isEmpty {
-                            howToRun = updatedRun
-                        }
-                        if let blockers = (remExecJSON["unresolvable_reasons"] as? [String])?
-                            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
-                            .filter({ !$0.isEmpty }),
-                           !blockers.isEmpty {
-                            for b in blockers {
-                                remExecTurn.keyPoints.append("TEAM BLOCKER REASON: \(b)")
-                            }
-                        }
-                    }
-
-                    session.entries.append(.turn(remExecTurn))
-                    session.updatedAt = Date()
-                    await onEvent(.sessionUpdated(session))
-                    await onEvent(.enqueueSpeech(SpeechQueueItem(
-                        id: remExecTurn.id,
-                        persona: executor,
-                        spokenText: remExecTurn.spokenTake,
-                        contextLabel: "Remediated · \(executor.name)"
-                    )))
-                }
+                session = try await runExecutionWaves(
+                    waves: remWaves,
+                    into: session,
+                    moderator: moderator,
+                    allCouncil: allCouncil,
+                    debaters: debaters,
+                    excludingBuilder: reviewer,
+                    reviewerNameForRemediation: reviewer.name,
+                    remediationPassIndex: passIndex,
+                    targetFolder: targetFolder,
+                    folderName: folderName,
+                    modelLabels: modelLabels,
+                    openRouterKey: openRouterKey,
+                    filesSummary: &filesSummary,
+                    howToRun: &howToRun,
+                    onEvent: onEvent
+                )
             }
         }
 
@@ -1070,6 +999,314 @@ public final class DebateOrchestrator: Sendable {
         }
         return DefaultRoster.personas.first(where: { $0.id == DefaultRoster.wardenID })
             ?? selectVerifier(from: debaters, fallback: moderator)
+    }
+
+    // MARK: - Parallel Wave Partitioning & Concurrent Workstream Execution
+
+    public struct ExecutionWave: Sendable {
+        public let waveNumber: Int
+        public let items: [ExecutionAssignment]
+    }
+
+    /// Groups `ExecutionAssignment`s into safe parallel execution waves.
+    /// Tasks in the same wave with non-overlapping `targetScope` paths execute concurrently via `ThrowingTaskGroup`,
+    /// while any accidental file/directory scope collision automatically shifts into the next sub-wave so two writers never clobber the same file.
+    public static func partitionIntoParallelWaves(
+        _ assignments: [ExecutionAssignment],
+        workspaceRoot: String? = nil
+    ) -> [ExecutionWave] {
+        guard !assignments.isEmpty else { return [] }
+
+        let hasExplicitWaves = assignments.contains { $0.wave != nil }
+        let groupedInput: [[ExecutionAssignment]]
+        if hasExplicitWaves {
+            let distinctWaves = Array(Set(assignments.map(\.effectiveWave))).sorted()
+            groupedInput = distinctWaves.map { w in
+                assignments.filter { $0.effectiveWave == w }
+            }
+        } else {
+            groupedInput = [assignments]
+        }
+
+        var result: [ExecutionWave] = []
+        var nextWaveIndex = 1
+        for group in groupedInput {
+            var buckets: [[ExecutionAssignment]] = []
+            for candidate in group {
+                if let bucketIdx = buckets.firstIndex(where: { existingBucket in
+                    !existingBucket.contains { existing in
+                        scopesPotentiallyCollide(existing.targetScope, candidate.targetScope, workspaceRoot: workspaceRoot)
+                    }
+                }) {
+                    buckets[bucketIdx].append(candidate)
+                } else {
+                    buckets.append([candidate])
+                }
+            }
+            for bucket in buckets {
+                result.append(ExecutionWave(waveNumber: nextWaveIndex, items: bucket))
+                nextWaveIndex += 1
+            }
+        }
+        return result
+    }
+
+    public static func scopesPotentiallyCollide(_ a: String, _ b: String, workspaceRoot: String? = nil) -> Bool {
+        let tokensA = normalizedScopeTokens(a, workspaceRoot: workspaceRoot)
+        let tokensB = normalizedScopeTokens(b, workspaceRoot: workspaceRoot)
+        // Empty or wildcard scope touches potentially anything in the workspace, so run it safely in its own wave
+        guard !tokensA.isEmpty, !tokensB.isEmpty else { return true }
+        for ta in tokensA {
+            if ta == "*" { return true }
+            for tb in tokensB {
+                if tb == "*" { return true }
+                if ta == tb { return true }
+                if ta.hasPrefix(tb + "/") || tb.hasPrefix(ta + "/") { return true }
+            }
+        }
+        return false
+    }
+
+    private static func normalizedScopeTokens(_ raw: String, workspaceRoot: String?) -> [String] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return [] }
+        let lowerRoot = (workspaceRoot ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        let parts = trimmed
+            .components(separatedBy: CharacterSet(charactersIn: ",;"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var tokens: [String] = []
+        for part in parts {
+            var norm = part.lowercased()
+            while norm.hasPrefix("./") {
+                norm = String(norm.dropFirst(2))
+            }
+            norm = norm.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if norm.isEmpty || norm == "." || norm == "*" || norm == "workspace" || norm.contains("as needed") || norm == lowerRoot {
+                return ["*"]
+            }
+            if !lowerRoot.isEmpty, norm.hasPrefix(lowerRoot + "/") {
+                norm = String(norm.dropFirst(lowerRoot.count + 1))
+            }
+            if norm.contains("*") {
+                let prefix = norm.components(separatedBy: "*").first?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
+                if prefix.isEmpty { return ["*"] }
+                tokens.append(prefix)
+            } else {
+                tokens.append(norm)
+            }
+        }
+        return tokens
+    }
+
+    private static func parseWave(_ raw: Any?) -> Int? {
+        if let i = raw as? Int { return max(1, i) }
+        if let n = raw as? NSNumber { return max(1, n.intValue) }
+        if let s = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), let i = Int(s) {
+            return max(1, i)
+        }
+        return nil
+    }
+
+    private struct WaveTaskOutcome: Sendable {
+        let orderIndex: Int
+        let executor: Persona
+        let result: Result<(turn: DebateTurn, files: [String], runCmd: String), Error>
+    }
+
+    private func runExecutionWaves(
+        waves: [ExecutionWave],
+        into initialSession: DebateSession,
+        moderator: Persona,
+        allCouncil: [Persona],
+        debaters: [Persona],
+        excludingBuilder: Persona?,
+        reviewerNameForRemediation: String?,
+        remediationPassIndex: Int?,
+        targetFolder: String,
+        folderName: String,
+        modelLabels: [String: String],
+        openRouterKey: String?,
+        filesSummary: inout [String],
+        howToRun: inout String,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async throws -> DebateSession {
+        var session = initialSession
+        let totalWaves = waves.count
+        let webOn = session.allowWebSearch
+
+        for wave in waves {
+            try Task.checkCancellation()
+            let resolved: [(index: Int, assignment: ExecutionAssignment, executor: Persona)] = wave.items.enumerated().map { idx, item in
+                var resolvedItem = item
+                resolvedItem.wave = wave.waveNumber
+                let exec = allCouncil.first {
+                    $0.name.localizedCaseInsensitiveContains(item.assignedPersonaName)
+                    || item.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
+                } ?? selectPrimaryBuilder(from: debaters, excluding: excludingBuilder, fallback: moderator)
+                return (idx, resolvedItem, exec)
+            }
+
+            let isParallel = resolved.count > 1
+            let activeNames = resolved.map(\.executor.name).joined(separator: ", ")
+            let prefixLabel = remediationPassIndex.map { "Remediation \($0) · Wave \(wave.waveNumber)/\(totalWaves)" }
+                ?? "Wave \(wave.waveNumber)/\(totalWaves)"
+            let initialStatus = isParallel
+                ? "\(prefixLabel) (Parallel): \(activeNames) building simultaneously in \(folderName)…"
+                : "\(prefixLabel): \(resolved[0].executor.name) building in \(folderName)…"
+
+            var remainingByIndex: [Int: Persona] = Dictionary(uniqueKeysWithValues: resolved.map { ($0.index, $0.executor) })
+            await onEvent(.activeThinkersChanged(Set(remainingByIndex.values.map(\.id)), statusLabel: initialStatus))
+
+            let waveContext = buildTranscriptContext(for: session)
+            let roundNum = remediationPassIndex.map { 110 + $0 } ?? 98
+
+            var waveSuccessCount = 0
+            var firstWaveError: Error?
+
+            try await withThrowingTaskGroup(of: WaveTaskOutcome.self) { group in
+                for entry in resolved {
+                    let peers = resolved
+                        .filter { $0.index != entry.index }
+                        .map { "\($0.executor.name) (scope: \($0.assignment.targetScope.isEmpty ? "assigned slice" : $0.assignment.targetScope))" }
+                    let modelLabel = modelLabels[entry.executor.modelID] ?? entry.executor.modelID
+                    let roundTag: String = {
+                        if let remPass = remediationPassIndex {
+                            return isParallel
+                                ? "Remediation \(remPass) · Wave \(wave.waveNumber) (Parallel)"
+                                : "Remediation \(remPass) · Wave \(wave.waveNumber)"
+                        }
+                        return isParallel
+                            ? "Wave \(wave.waveNumber)/\(totalWaves) · Parallel"
+                            : "Wave \(wave.waveNumber)/\(totalWaves)"
+                    }()
+
+                    group.addTask { [runner] in
+                        do {
+                            let sysPrompt: String
+                            if let revName = reviewerNameForRemediation {
+                                sysPrompt = DebatePrompts.completenessRemediationExecutionPrompt(
+                                    executor: entry.executor,
+                                    moderatorName: moderator.name,
+                                    reviewerName: revName,
+                                    assignment: entry.assignment,
+                                    concurrentPeers: peers,
+                                    workspacePath: targetFolder
+                                )
+                            } else {
+                                sysPrompt = DebatePrompts.coordinatedExecutionSystemPrompt(
+                                    executor: entry.executor,
+                                    moderatorName: moderator.name,
+                                    assignment: entry.assignment,
+                                    concurrentPeers: peers,
+                                    workspacePath: targetFolder
+                                )
+                            }
+
+                            let resp = try await runner.call(ModelCallRequest(
+                                provider: entry.executor.provider,
+                                modelID: entry.executor.modelID,
+                                effort: entry.executor.effort,
+                                systemPrompt: sysPrompt,
+                                userPrompt: waveContext,
+                                allowWebSearch: webOn,
+                                toolPhase: .coordinatedReadWrite,
+                                workspacePath: targetFolder,
+                                openRouterAPIKey: openRouterKey
+                            ))
+
+                            var turn = self.parseDebateTurn(
+                                raw: resp.rawText,
+                                durationMs: resp.durationMs,
+                                roundNumber: roundNum,
+                                roundLabel: roundTag,
+                                persona: entry.executor,
+                                modelLabel: modelLabel,
+                                defaultStance: .executing
+                            )
+
+                            var extractedFiles: [String] = []
+                            var extractedRun = ""
+                            if let parsed = JSONExtractor.parseObject(resp.rawText) {
+                                extractedFiles = (parsed["files_summary"] as? [String])?.filter { !$0.isEmpty } ?? []
+                                extractedRun = (parsed["how_to_run"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                                if let blockers = (parsed["unresolvable_reasons"] as? [String])?
+                                    .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                                    .filter({ !$0.isEmpty }) {
+                                    for b in blockers {
+                                        turn.keyPoints.append("TEAM BLOCKER REASON: \(b)")
+                                    }
+                                }
+                            }
+                            return WaveTaskOutcome(
+                                orderIndex: entry.index,
+                                executor: entry.executor,
+                                result: .success((turn, extractedFiles, extractedRun))
+                            )
+                        } catch {
+                            return WaveTaskOutcome(
+                                orderIndex: entry.index,
+                                executor: entry.executor,
+                                result: .failure(error)
+                            )
+                        }
+                    }
+                }
+
+                // Stream each builder's turn & voice cue live onto the timeline the moment that builder finishes!
+                for try await outcome in group {
+                    remainingByIndex.removeValue(forKey: outcome.orderIndex)
+                    switch outcome.result {
+                    case .success(let payload):
+                        waveSuccessCount += 1
+                        for f in payload.files where !filesSummary.contains(f) {
+                            filesSummary.append(f)
+                        }
+                        if !payload.runCmd.isEmpty {
+                            howToRun = payload.runCmd
+                        }
+                        session.entries.append(.turn(payload.turn))
+                        session.updatedAt = Date()
+                        await onEvent(.sessionUpdated(session))
+                        await onEvent(.enqueueSpeech(SpeechQueueItem(
+                            id: payload.turn.id,
+                            persona: outcome.executor,
+                            spokenText: payload.turn.spokenTake,
+                            contextLabel: (remediationPassIndex != nil ? "Remediated" : "Built") + " · \(outcome.executor.name)"
+                        )))
+                    case .failure(let err):
+                        if Task.isCancelled { throw ModelRunnerError.cancelled }
+                        if case ModelRunnerError.cancelled = err { throw err }
+                        firstWaveError = firstWaveError ?? err
+                        session.entries.append(.systemNote(
+                            UUID(),
+                            "\(outcome.executor.name) encountered an error in Wave \(wave.waveNumber): \(err.localizedDescription)"
+                        ))
+                        session.updatedAt = Date()
+                        await onEvent(.sessionUpdated(session))
+                    }
+
+                    if !remainingByIndex.isEmpty {
+                        let stillWorking = remainingByIndex.values.map(\.name).joined(separator: ", ")
+                        await onEvent(.activeThinkersChanged(
+                            Set(remainingByIndex.values.map(\.id)),
+                            statusLabel: "\(prefixLabel): Waiting on \(stillWorking) in \(folderName)…"
+                        ))
+                    }
+                }
+            }
+
+            if waveSuccessCount == 0, let firstWaveError {
+                throw firstWaveError
+            }
+        }
+
+        return session
     }
 
     /// Synthesizes a tailored coding-harness handoff prompt using the Chair when the user wants custom AI synthesis/filtering.
@@ -1769,15 +2006,17 @@ public final class DebateOrchestrator: Sendable {
 
             var assignments: [ExecutionAssignment] = []
             if let rawAssign = json["execution_assignments"] as? [[String: Any]] {
-                for item in rawAssign.prefix(4) {
+                for item in rawAssign.prefix(8) {
                     guard let who = (item["assigned_to"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                           let instr = (item["task_instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                           !who.isEmpty, !instr.isEmpty else { continue }
                     let scope = (item["target_scope"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let wave = Self.parseWave(item["wave"])
                     assignments.append(ExecutionAssignment(
                         assignedPersonaName: who,
                         taskInstruction: instr,
-                        targetScope: scope
+                        targetScope: scope,
+                        wave: wave
                     ))
                 }
             }
@@ -1864,8 +2103,9 @@ public final class DebateOrchestrator: Sendable {
                 }
                 if let assignments = v.executionAssignments, !assignments.isEmpty {
                     vBlock += "\nExecution Workstreams:\n" + assignments.enumerated().map { idx, a in
+                        let wavePrefix = a.wave.map { "[Wave \($0)] " } ?? ""
                         let scope = a.targetScope.isEmpty ? "" : " [Scope: \(a.targetScope)]"
-                        return "\(idx + 1). \(a.assignedPersonaName): \(a.taskInstruction)\(scope)"
+                        return "\(idx + 1). \(wavePrefix)\(a.assignedPersonaName): \(a.taskInstruction)\(scope)"
                     }.joined(separator: "\n")
                 }
                 sections.append(vBlock)

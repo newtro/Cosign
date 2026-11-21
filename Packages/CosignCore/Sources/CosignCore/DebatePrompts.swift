@@ -10,7 +10,7 @@ public enum JSONExtractor {
         "execution_assignments", "verification_passed", "issues_found",
         "files_summary", "how_to_run", "consensus_reached",
         "completeness_percent", "is_complete", "missing_items",
-        "accepted_blockers", "unresolvable_reasons"
+        "accepted_blockers", "unresolvable_reasons", "wave"
     ]
 
     /// Extracts the outermost JSON object `{ ... }` from an LLM response even if wrapped in markdown fences,
@@ -339,7 +339,12 @@ public enum DebatePrompts {
     - When genuinely fitting your reaction, you may drop at most ONE natural inline vocal cue in parentheses from this exact set: `(laugh)`, `(sigh)`, `(clears throat)`, `(cough)`.
     """
 
-    public static func workspaceToolsBlock(workspacePath: String?, toolsEnabled: Bool, allowWrites: Bool) -> String {
+    public static func workspaceToolsBlock(
+        workspacePath: String?,
+        toolsEnabled: Bool,
+        allowWrites: Bool,
+        concurrentPeers: [String] = []
+    ) -> String {
         guard toolsEnabled else {
             return "TOOLS: Closed-book mode is active for this session—answer from pure reasoning."
         }
@@ -347,19 +352,30 @@ public enum DebatePrompts {
         let extras = WorkspaceResolver.additionalRepoRoots(excluding: ws)
         let extraNote = extras.isEmpty ? "" : "\nAdditional repo roots on this Mac: \(extras.joined(separator: ", "))"
         if allowWrites {
+            let concurrencyNote: String
+            if concurrentPeers.isEmpty {
+                concurrencyNote = "- You may freely spawn your own sub-agents and parallel tool calls to divide & conquer multi-file edits, scaffolding, and verification rapidly!"
+            } else {
+                concurrencyNote = """
+                - PARALLEL COUNCIL WAVE ACTIVE: Concurrent teammates working right now in this repo: \(concurrentPeers.joined(separator: "; ")).
+                - SUB-AGENTS UNLOCKED: You are encouraged to spawn your own sub-agents and parallel tool batches to build your slice faster, provided you and your sub-agents confine ALL file writes strictly to your assigned `Target Scope`!
+                - PARALLEL SAFETY RULE: Do NOT touch files owned by concurrent teammates above, and NEVER run destructive workspace-wide git commands (`git reset --hard`, `git checkout --`, `git clean`, `git stash`) while teammates have live edits in flight.
+                """
+            }
             return """
-            CLI & REPO TOOLS (CHAIR-DESIGNATED WRITE ACCESS ENABLED):
+            CLI, SUB-AGENT & REPO TOOLS (WRITE & EXECUTION ACCESS ENABLED):
             - Active working directory: \(ws)\(extraNote)
-            - You have full CLI tools (`Read`, `Edit`, `Write`, `Grep`, `Glob`, `git`, `gh` for GitHub, shell commands, MCPs, and web search).
-            - You are the ONLY persona holding the write lock right now. Make clean, surgical changes within your assigned scope, verify your work (e.g. build/test/check), and report concisely in `tools_used`.
+            - You have full agentic CLI tools (`Read`, `Edit`, `Write`, `Grep`, `Glob`, `git`, `gh`, shell commands, MCPs, web search, and native sub-agent spawning).
+            \(concurrencyNote)
+            - Verify your work (compile/lint/test) and summarize key files & sub-agents/commands used in `tools_used`.
             """
         } else {
             return """
-            CLI & REPO RESEARCH TOOLS (READ / INSPECT MODE):
+            CLI, SUB-AGENT & REPO RESEARCH TOOLS (READ / INSPECT MODE):
             - Active working directory: \(ws)\(extraNote)
-            - Whenever the user references local projects, repos on disk, or GitHub repos/issues/PRs, actively use your CLI tools (read files, search directories, `git log/status/diff`, `gh repo/pr/issue`, MCPs, web search) to gather real facts and cite concrete files instead of guessing!
-            - Do NOT modify or write files during the debate phase—Vera (The Chair) coordinates all file edits after consensus.
-            - Briefly note any files, repos, or commands you inspected in `tools_used` (e.g. "Inspected iSmith/Makefile & ran gh repo view"), or "" if none were needed.
+            - Actively use your CLI tools AND feel free to spawn parallel read-only sub-agents to inspect multiple directories, scripts, `git log/status/diff`, `gh repo/pr/issue`, MCPs, and docs simultaneously instead of guessing!
+            - Do NOT modify or write files during read/debate turns—file writes happen in Chair-dispatched execution waves.
+            - Briefly note files, sub-agents, or commands you inspected in `tools_used` (e.g. "Spawned 2 research sub-agents across Server/ and Client/"), or "" if none were needed.
             """
         }
     }
@@ -591,9 +607,11 @@ public enum DebatePrompts {
 
         YOUR TASK — CO-SIGNED VERDICT & COORDINATED EXECUTION PLAN:
         1. Deliver a decisive, concrete `recommendation` integrating what survived the debate, plus `action_steps`, `key_tradeoffs`, `cosigned_by`, and any holdout `dissents`.
-        2. COORDINATING EDITS:
+        2. COORDINATING PARALLEL EXECUTION WAVES:
            - Set `should_auto_execute` to `true` ONLY IF the user explicitly asked the council to make file edits, write code/docs, or apply changes in this prompt (keep `false` if the user was asking a question, brainstorming, or asking for advice/design).
-           - Whenever concrete repo/file tasks make sense (either for `should_auto_execute: true` OR in case the user clicks "Execute Co-Signed Plan"), break them into 1 to 3 non-overlapping sequential `execution_assignments`, assigning each (`assigned_to`) to the best-suited council member (\(roster)) so no two tasks touch the same files concurrently!
+           - Whenever concrete repo/file tasks make sense (either for `should_auto_execute: true` OR in case the user clicks "Build This Plan"), break them into **1 to 6 scoped `execution_assignments`** organized into **Parallel Waves (`"wave": 1`, `"wave": 2`, ...)**:
+             * Give independent tasks with non-overlapping `target_scope` paths the **SAME `"wave"` number** (e.g. `"wave": 1`) so multiple council personas execute simultaneously in parallel (and each persona can spawn its own sub-agents)!
+             * Only increment `"wave"` (`"wave": 2`, `"wave": 3`) for tasks that genuinely depend on an earlier wave's outputs or touch shared integration files.
 
         \(expressiveVoiceGuidance)
 
@@ -615,8 +633,9 @@ public enum DebatePrompts {
           "execution_assignments": [
             {
               "assigned_to": "Exact Persona First Name",
+              "wave": 1,
               "task_instruction": "Specific, self-contained edit/verification instruction.",
-              "target_scope": "Files or folder scope"
+              "target_scope": "Specific non-overlapping files or directory scope"
             }
           ],
           "supporting_notes": "Summary of how the panel's arguments were weighed and synthesized."
@@ -628,19 +647,20 @@ public enum DebatePrompts {
         executor: Persona,
         moderatorName: String,
         assignment: ExecutionAssignment,
+        concurrentPeers: [String] = [],
         workspacePath: String?
     ) -> String {
         return """
-        You are \(executor.name), \(executor.title), executing a Chair-coordinated task assigned by \(moderatorName) after the council Co-Signed Verdict.
+        You are \(executor.name), \(executor.title), executing a Chair-dispatched build workstream (Wave \(assignment.effectiveWave)) assigned by \(moderatorName).
         Personality: \(executor.personality)
 
-        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: true))
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: true, concurrentPeers: concurrentPeers))
 
-        ASSIGNED TASK:
+        ASSIGNED TASK (WAVE \(assignment.effectiveWave)):
         \(assignment.taskInstruction)
         Target Scope: \(assignment.targetScope.isEmpty ? "As needed in workspace" : assignment.targetScope)
 
-        Execute the changes cleanly using your CLI tools, run appropriate checks/tests if applicable, and report back in character!
+        Execute the changes cleanly using your CLI tools—and feel free to spin up your own sub-agents in parallel for multi-file coding, asset/data inspection, or local checks within your `Target Scope`! Run appropriate checks/tests and report back in character.
 
         \(expressiveVoiceGuidance)
 
@@ -649,9 +669,9 @@ public enum DebatePrompts {
           "stance": "executing",
           "target_persona": "\(moderatorName)",
           "spoken_take": "2-3 crisp spoken sentences reporting what you changed and verified.",
-          "supporting_notes": "Summary of edits made and verification output.",
+          "supporting_notes": "Summary of edits made, sub-agents used (if any), and verification output.",
           "key_points": ["File/change 1", "Verification result"],
-          "tools_used": "Exact files edited and commands run"
+          "tools_used": "Exact files edited, sub-agents spawned, and commands run"
         }
         """
     }
@@ -760,8 +780,8 @@ public enum DebatePrompts {
 
         \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
 
-        PHASE 1 — ARCHITECTURE & WORKSTREAM HUDDLE:
-        Inspect the target directory (`\(workspacePath ?? ".")`) first. From your specialist angle, propose the cleanest file/module architecture, exact stack/tooling choices, and key edge cases or verification tests we must hit so the project builds and runs cleanly on the first pass. Do NOT edit files yet—the Chair assigns sequential write locks next.
+        PHASE 1 — PARALLEL ARCHITECTURE & WORKSTREAM HUDDLE:
+        Inspect the target directory (`\(workspacePath ?? ".")`) first (feel free to spawn read-only research sub-agents to scan folders rapidly). From your specialist angle, propose clean module/file boundaries with explicit contracts so multiple council personas can build **in parallel waves** without stepping on each other's files, plus key verification tests. Do NOT edit files yet—the Chair dispatches parallel build waves next.
 
         \(expressiveVoiceGuidance)
 
@@ -792,10 +812,11 @@ public enum DebatePrompts {
 
         \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
         \(extraBlock)
-        YOUR TASK — CONCRETE MULTI-AGENT BUILD BLUEPRINT:
-        Synthesize the agreed architecture (or prior Debate Verdict) into an actionable Build Blueprint with **2 to 4 sequential, non-overlapping `execution_assignments`** inside `\(workspacePath ?? ".")`:
-        - Assign each workstream (`assigned_to`) to the best-suited builder on the panel so their strengths shine (e.g. scaffolding & core engine first, features/UI second, tests/docs/polish third).
-        - Make every `task_instruction` concrete and self-contained (exact files to create/edit in `\(workspacePath ?? ".")`, interfaces to match earlier steps, and local check commands).
+        YOUR TASK — CONCRETE MULTI-AGENT PARALLEL BUILD BLUEPRINT:
+        Synthesize the agreed architecture (or prior Debate Verdict) into an actionable Build Blueprint with **2 to 6 scoped `execution_assignments`** organized into **Parallel Execution Waves (`"wave": 1`, `"wave": 2`, ...)** inside `\(workspacePath ?? ".")`:
+        - **MAXIMIZE PARALLELISM WHERE SAFE**: Assign the **SAME `"wave"` number** (starting at `"wave": 1`) to every persona whose `target_scope` files/subdirectories do NOT overlap and can be built simultaneously! For example, in Wave 1: one specialist builds backend/core systems (`Server/` or `Core/`), while a second specialist simultaneously builds frontend/UI/prefabs (`Client/` or `UI/`), while a third builds test harnesses/fixtures (`Tests/`)—and each persona can also spawn its own sub-agents inside its scope!
+        - Advance to `"wave": 2` (or `"wave": 3`) ONLY when a task genuinely depends on Wave 1's created files (such as final cross-module integration wiring or end-to-end packaging) or touches a shared file.
+        - Give every assignment an explicit, non-overlapping `target_scope` (exact file paths or subdirectory prefixes) and crisp interface contracts so parallel Wave-1 builders integrate cleanly!
         - Set `should_auto_execute` to `true`.
 
         \(expressiveVoiceGuidance)
@@ -803,9 +824,9 @@ public enum DebatePrompts {
         Return ONLY valid JSON:
         {
           "headline": "Sharp 5-10 word build blueprint headline",
-          "spoken_verdict": "2-4 spirited spoken sentences kicking off the build and calling out who owns each workstream.",
+          "spoken_verdict": "2-4 spirited spoken sentences kicking off the build and calling out which workstreams run in parallel in Wave 1 and Wave 2.",
           "recommendation": "Concise architectural overview of what is being built in \(workspacePath ?? "the target folder").",
-          "action_steps": ["Workstream 1 summary", "Workstream 2 summary", "Verification & tests"],
+          "action_steps": ["Wave 1 parallel workstreams summary", "Wave 2 integration summary", "Verification & completeness audit"],
           "key_tradeoffs": ["Key engineering constraint 1"],
           "cosigned_by": ["Builder 1", "Builder 2"],
           "dissents": [],
@@ -813,11 +834,12 @@ public enum DebatePrompts {
           "execution_assignments": [
             {
               "assigned_to": "Exact Persona First Name",
-              "task_instruction": "Create/implement exact files and run syntax/build check.",
-              "target_scope": "Specific files or subdirectory"
+              "wave": 1,
+              "task_instruction": "Create/implement exact files (using sub-agents freely within scope) and run syntax/module check.",
+              "target_scope": "Specific non-overlapping files or subdirectory"
             }
           ],
-          "supporting_notes": "Module contract notes across workstreams."
+          "supporting_notes": "Module contract notes across parallel waves."
         }
         """
     }
@@ -965,8 +987,10 @@ public enum DebatePrompts {
         \(reviewerName) (Completeness Reviewer) audited the build and REJECTED sign-off with these exact gaps:
         \(bullets)
 
-        YOUR TASK — DISPATCH SURGICAL REMEDIATION WORKSTREAMS:
-        1. Break EVERY single item above into **1 to 4 sequential, non-overlapping `execution_assignments`** assigned (`assigned_to`) to the best-suited council members (\(roster)), including rebuilding any final app/artifact and running full verification!
+        YOUR TASK — DISPATCH SURGICAL REMEDIATION WORKSTREAMS (PARALLEL WAVES):
+        1. Break EVERY single item above into **1 to 6 scoped `execution_assignments`** across (\(roster)), organized into **Parallel Waves (`"wave": 1`, `"wave": 2`, ...)**:
+           - Put independent fixes/implementations touching disjoint `target_scope` files into `"wave": 1` so multiple personas fix missed items **in parallel** (each free to spawn sub-agents within its scope)!
+           - Put dependent integration, final app packaging, or full suite verification in `"wave": 2` if needed.
         2. If—and ONLY if—a specific item genuinely CANNOT be solved locally due to a hard external/environmental blocker, assign an engineer to verify and document the exact technical proof in `unresolvable_reasons` (never use excuses for solvable engineering/wiring work!).
 
         \(expressiveVoiceGuidance)
@@ -974,14 +998,15 @@ public enum DebatePrompts {
         Return ONLY valid JSON:
         {
           "stance": "moderating",
-          "spoken_take": "2-3 decisive spoken sentences dispatching the team to close every gap \(reviewerName) caught.",
-          "supporting_notes": "How the punch-list is divided across sequential single-writer workstreams.",
+          "spoken_take": "2-3 decisive spoken sentences dispatching the team in parallel waves to close every gap \(reviewerName) caught.",
+          "supporting_notes": "How the punch-list is divided across parallel & dependent workstreams.",
           "key_points": ["Remediation Pass \(iteration)"],
           "execution_assignments": [
             {
               "assigned_to": "Exact Persona First Name",
+              "wave": 1,
               "task_instruction": "Complete exact missing feature/wiring/build and verify on disk.",
-              "target_scope": "Specific files or folders"
+              "target_scope": "Specific non-overlapping files or folders"
             }
           ]
         }
@@ -993,20 +1018,21 @@ public enum DebatePrompts {
         moderatorName: String,
         reviewerName: String,
         assignment: ExecutionAssignment,
+        concurrentPeers: [String] = [],
         workspacePath: String?
     ) -> String {
         return """
-        You are \(executor.name), \(executor.title), executing a **COMPLETENESS REMEDIATION WORKSTREAM** dispatched by \(moderatorName) to close gaps flagged by \(reviewerName) inside `\(workspacePath ?? ".")`.
+        You are \(executor.name), \(executor.title), executing a **COMPLETENESS REMEDIATION WORKSTREAM** (Wave \(assignment.effectiveWave)) dispatched by \(moderatorName) to close gaps flagged by \(reviewerName) inside `\(workspacePath ?? ".")`.
         Personality: \(executor.personality)
 
-        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: true))
+        \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: true, concurrentPeers: concurrentPeers))
 
-        ASSIGNED REMEDIATION TASK:
+        ASSIGNED REMEDIATION TASK (WAVE \(assignment.effectiveWave)):
         \(assignment.taskInstruction)
         Target Scope: \(assignment.targetScope.isEmpty ? "As needed in workspace" : assignment.targetScope)
 
         RULES:
-        - Implement the full, real solution on disk—zero placeholders, zero stubbed methods, zero unwired assets!
+        - Implement the full, real solution on disk—zero placeholders, zero stubbed methods, zero unwired assets! Feel free to spawn your own sub-agents to parallelize work inside your `Target Scope`.
         - Run the build/compiler/tests to confirm your work compiles and integrates cleanly.
         - ONLY if a specific sub-requirement is genuinely impossible due to a verified external constraint (e.g. missing external API key or hardware), document the exact technical proof in `unresolvable_reasons`; otherwise leave `unresolvable_reasons` as `[]`.
 

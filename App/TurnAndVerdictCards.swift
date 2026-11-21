@@ -1406,7 +1406,7 @@ struct BuildLaunchSheet: View {
                     Text("Build This Plan with the Council")
                         .font(.system(size: 17, weight: .bold, design: .serif))
                         .foregroundStyle(StudioTheme.inkPrimary)
-                    Text("Chair-coordinated sequential workstreams → Adversarial QA & Test Verification → Auto-Fix")
+                    Text("Parallel Multi-Agent Waves & Sub-Agents → Adversarial QA → 100% Completeness Audit")
                         .font(.system(size: 12))
                         .foregroundStyle(StudioTheme.inkSecondary)
                 }
