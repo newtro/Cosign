@@ -623,7 +623,7 @@ struct PersonaStudioSheet: View {
                 .background(StudioTheme.sidebarBg)
             }
         }
-        .frame(width: 920, height: 690)
+        .frame(minWidth: 740, idealWidth: 920, maxWidth: .infinity, minHeight: 540, idealHeight: 690, maxHeight: .infinity)
         .background(StudioTheme.canvasTop)
         .preferredColorScheme(.dark)
         .onAppear {

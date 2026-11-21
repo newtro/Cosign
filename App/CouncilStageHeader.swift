@@ -134,41 +134,13 @@ struct CouncilStageHeader: View {
                 }
             }
 
-            // Seated Council Medallions Strip
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    CouncilSeatCard(
-                        persona: moderator,
-                        modelLabel: model.displayLabel(for: moderator.provider, modelID: moderator.modelID),
-                        isModerator: true,
-                        isThinking: model.activeThinkerIDs.contains(moderator.id),
-                        isSpeaking: model.voiceEngine.activeItem?.persona.id == moderator.id && model.voiceEngine.isPlaying,
-                        speakerLevel: model.voiceEngine.speakerLevel,
-                        latestStance: latestStance(for: moderator.id, in: session)
-                    ) {
-                        model.openStudio(for: moderator.id)
-                    }
+            // Seated Council Medallions Strip (Expands fluidly across wide monitors; scrolls cleanly on narrow splits)
+            ViewThatFits(in: .horizontal) {
+                seatsStrip(moderator: moderator, debaters: debaters, expandToFill: true)
 
-                    Rectangle()
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: 1, height: 40)
-                        .padding(.horizontal, 2)
-
-                    ForEach(debaters) { debater in
-                        CouncilSeatCard(
-                            persona: debater,
-                            modelLabel: model.displayLabel(for: debater.provider, modelID: debater.modelID),
-                            isModerator: false,
-                            isThinking: model.activeThinkerIDs.contains(debater.id),
-                            isSpeaking: model.voiceEngine.activeItem?.persona.id == debater.id && model.voiceEngine.isPlaying,
-                            speakerLevel: model.voiceEngine.speakerLevel,
-                            latestStance: latestStance(for: debater.id, in: session)
-                        ) {
-                            model.openStudio(for: debater.id)
-                        }
-                    }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    seatsStrip(moderator: moderator, debaters: debaters, expandToFill: false)
                 }
-                .padding(.vertical, 2)
             }
         }
         .padding(.horizontal, 22)
@@ -236,6 +208,44 @@ struct CouncilStageHeader: View {
         }
         return nil
     }
+
+    private func seatsStrip(moderator: Persona, debaters: [Persona], expandToFill: Bool) -> some View {
+        HStack(spacing: 10) {
+            CouncilSeatCard(
+                persona: moderator,
+                modelLabel: model.displayLabel(for: moderator.provider, modelID: moderator.modelID),
+                isModerator: true,
+                isThinking: model.activeThinkerIDs.contains(moderator.id),
+                isSpeaking: model.voiceEngine.activeItem?.persona.id == moderator.id && model.voiceEngine.isPlaying,
+                speakerLevel: model.voiceEngine.speakerLevel,
+                latestStance: latestStance(for: moderator.id, in: session),
+                expandToFill: expandToFill
+            ) {
+                model.openStudio(for: moderator.id)
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 1, height: 40)
+                .padding(.horizontal, 2)
+
+            ForEach(debaters) { debater in
+                CouncilSeatCard(
+                    persona: debater,
+                    modelLabel: model.displayLabel(for: debater.provider, modelID: debater.modelID),
+                    isModerator: false,
+                    isThinking: model.activeThinkerIDs.contains(debater.id),
+                    isSpeaking: model.voiceEngine.activeItem?.persona.id == debater.id && model.voiceEngine.isPlaying,
+                    speakerLevel: model.voiceEngine.speakerLevel,
+                    latestStance: latestStance(for: debater.id, in: session),
+                    expandToFill: expandToFill
+                ) {
+                    model.openStudio(for: debater.id)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
 }
 
 // MARK: - Individual Seated Persona Medallion
@@ -248,6 +258,7 @@ struct CouncilSeatCard: View {
     let isSpeaking: Bool
     let speakerLevel: CGFloat
     let latestStance: StanceKind?
+    var expandToFill: Bool = false
     let onTap: () -> Void
 
     @State private var hovering = false
@@ -331,9 +342,14 @@ struct CouncilSeatCard: View {
                             .lineLimit(1)
                     }
                 }
+
+                if expandToFill {
+                    Spacer(minLength: 0)
+                }
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 8)
+            .frame(maxWidth: expandToFill ? .infinity : nil, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
                     .fill(isSpeaking ? accent.opacity(0.11) : (hovering ? StudioTheme.cardElevated : StudioTheme.cardSurface.opacity(0.85)))

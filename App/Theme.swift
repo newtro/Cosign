@@ -182,34 +182,40 @@ struct FlowLayout: Layout {
         var usedWidth: CGFloat = 0
 
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x > 0 && x + size.width > maxWidth {
+            let rawSize = view.sizeThatFits(ProposedViewSize(width: maxWidth, height: nil))
+            let itemWidth = min(rawSize.width, maxWidth)
+            if x > 0 && x + itemWidth > maxWidth {
                 x = 0
                 y += rowHeight + lineSpacing
                 rowHeight = 0
             }
-            usedWidth = max(usedWidth, x + size.width)
-            rowHeight = max(rowHeight, size.height)
-            x += size.width + spacing
+            usedWidth = max(usedWidth, x + itemWidth)
+            rowHeight = max(rowHeight, rawSize.height)
+            x += itemWidth + spacing
         }
-        return CGSize(width: usedWidth, height: y + rowHeight)
+        return CGSize(width: min(usedWidth, maxWidth), height: y + rowHeight)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxWidth = max(1, bounds.width)
         var x = bounds.minX
         var y = bounds.minY
         var rowHeight: CGFloat = 0
 
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x > bounds.minX && x + size.width > bounds.maxX {
+            let rawSize = view.sizeThatFits(ProposedViewSize(width: maxWidth, height: nil))
+            let itemWidth = min(rawSize.width, maxWidth)
+            if x > bounds.minX && x + itemWidth > bounds.maxX {
                 x = bounds.minX
                 y += rowHeight + lineSpacing
                 rowHeight = 0
             }
-            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            rowHeight = max(rowHeight, size.height)
-            x += size.width + spacing
+            view.place(
+                at: CGPoint(x: x, y: y),
+                proposal: ProposedViewSize(width: itemWidth, height: rawSize.height)
+            )
+            rowHeight = max(rowHeight, rawSize.height)
+            x += itemWidth + spacing
         }
     }
 }

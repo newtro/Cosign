@@ -3,6 +3,10 @@ import CosignCore
 import CosignVoice
 import SwiftUI
 
+private extension Notification.Name {
+    static let cosignScrollToBottom = Notification.Name("Cosign.ScrollToBottom")
+}
+
 @main
 struct CosignApp: App {
     @NSApplicationDelegateAdaptor(CosignAppDelegate.self) private var appDelegate
@@ -23,7 +27,8 @@ struct CosignApp: App {
                 EmptyView()
             } else {
                 CosignRootView(model: model)
-                    .frame(minWidth: 980, minHeight: 680)
+                    .frame(minWidth: 760, minHeight: 540)
+                    .background(WindowGeometryPersistenceView())
                     .preferredColorScheme(.dark)
                     .onAppear {
                         updater.start(appModel: model)
@@ -31,7 +36,7 @@ struct CosignApp: App {
             }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1240, height: 840)
+        .defaultSize(width: 1320, height: 880)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {
@@ -49,6 +54,13 @@ struct CosignApp: App {
                     model.openStudio()
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("Scroll to Bottom") {
+                    NotificationCenter.default.post(name: .cosignScrollToBottom, object: nil)
+                }
+                .keyboardShortcut("j", modifiers: [.command])
             }
         }
 
@@ -66,95 +78,184 @@ final class CosignAppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Main Studio Window View
 
+private struct BottomSentinelMaxYKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct CosignRootView: View {
     @ObservedObject var model: AppModel
 
     @State private var draftPrompt: String = ""
+    @State private var scrollToBottomTrigger: Int = 0
+    @State private var isScrolledNearBottom: Bool = true
     @FocusState private var isComposerFocused: Bool
 
     var body: some View {
         NavigationSplitView {
             CouncilSidebarView(model: model)
-                .navigationSplitViewColumnWidth(min: 235, ideal: 260, max: 310)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
         } detail: {
             if let session = model.currentSession {
-                ZStack {
-                    // Deep Atmospheric Studio Canvas + Active Speaker Radial Glow
-                    StudioAmbientCanvas(model: model)
+                GeometryReader { detailGeo in
+                    let horizontalMargin: CGFloat = detailGeo.size.width < 760 ? 14 : (detailGeo.size.width < 1260 ? 24 : 36)
 
-                    VStack(spacing: 0) {
-                        CouncilStageHeader(model: model, session: session)
+                    ZStack {
+                        // Deep Atmospheric Studio Canvas + Active Speaker Radial Glow
+                        StudioAmbientCanvas(model: model)
 
-                        // Timeline Stream
-                        if session.entries.isEmpty {
-                            ScrollView {
-                                EmptyCouncilWelcomeView(model: model, session: session) { starter in
-                                    draftPrompt = starter
-                                    isComposerFocused = true
-                                }
-                            }
-                        } else {
-                            ScrollViewReader { proxy in
+                        VStack(spacing: 0) {
+                            CouncilStageHeader(model: model, session: session)
+
+                            // Timeline Stream
+                            if session.entries.isEmpty {
                                 ScrollView {
-                                    LazyVStack(alignment: .leading, spacing: 14) {
-                                        ForEach(session.entries) { entry in
-                                            timelineEntryView(entry)
-                                                .id(entry.id)
-                                                .transition(.opacity.combined(with: .move(edge: .bottom)))
-                                        }
+                                    EmptyCouncilWelcomeView(model: model, session: session) { starter in
+                                        draftPrompt = starter
+                                        isComposerFocused = true
+                                    }
+                                }
+                            } else {
+                                GeometryReader { scrollViewport in
+                                    ScrollViewReader { proxy in
+                                        ZStack(alignment: .bottomTrailing) {
+                                            ScrollView {
+                                                LazyVStack(alignment: .leading, spacing: 14) {
+                                                    ForEach(session.entries) { entry in
+                                                        timelineEntryView(entry)
+                                                            .id(entry.id)
+                                                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                                    }
 
-                                        if session.stage.isBusy {
-                                            LiveThinkingPulseRow(model: model, session: session)
-                                                .id("live-pulse-anchor")
-                                        } else if session.stage == .completed && !session.entries.isEmpty {
-                                            SessionCompletedFinaleCard(model: model, session: session)
-                                                .id("session-complete-anchor")
-                                        }
-                                    }
-                                    .padding(.horizontal, 26)
-                                    .padding(.top, 20)
-                                    .padding(.bottom, 16)
-                                    .frame(maxWidth: 920)
-                                    .frame(maxWidth: .infinity)
-                                }
-                                .onChange(of: session.entries.count) { _, _ in
-                                    if let lastEntry = session.entries.last {
-                                        let isVerdict: Bool = {
-                                            if case .verdict = lastEntry { return true }
-                                            return false
-                                        }()
-                                        withAnimation(.easeOut(duration: 0.28)) {
-                                            proxy.scrollTo(lastEntry.id, anchor: isVerdict ? .top : .bottom)
-                                        }
-                                    }
-                                }
-                                .onChange(of: session.stage) { _, newStage in
-                                    if newStage == .completed {
-                                        let lastIsVerdict: Bool = {
-                                            if let last = session.entries.last, case .verdict = last { return true }
-                                            return false
-                                        }()
-                                        if !lastIsVerdict {
-                                            withAnimation(.easeOut(duration: 0.3)) {
-                                                proxy.scrollTo("session-complete-anchor", anchor: .bottom)
+                                                    if session.stage.isBusy {
+                                                        LiveThinkingPulseRow(model: model, session: session)
+                                                            .id("live-pulse-anchor")
+                                                    } else if session.stage == .completed && !session.entries.isEmpty {
+                                                        SessionCompletedFinaleCard(model: model, session: session)
+                                                            .id("session-complete-anchor")
+                                                    }
+
+                                                    // Invisible bottom sentinel for exact scroll-position tracking & jump-to-bottom
+                                                    GeometryReader { sentinelGeo in
+                                                        Color.clear
+                                                            .preference(
+                                                                key: BottomSentinelMaxYKey.self,
+                                                                value: sentinelGeo.frame(in: .named("timelineScrollSpace")).maxY
+                                                            )
+                                                    }
+                                                    .frame(height: 1)
+                                                    .id("timeline-bottom-sentinel")
+                                                }
+                                                .padding(.horizontal, horizontalMargin)
+                                                .padding(.top, 18)
+                                                .padding(.bottom, 14)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                            }
+                                            .coordinateSpace(name: "timelineScrollSpace")
+                                            .onPreferenceChange(BottomSentinelMaxYKey.self) { sentinelMaxY in
+                                                let threshold = scrollViewport.size.height + 64
+                                                let nearBottom = sentinelMaxY <= threshold || sentinelMaxY == 0
+                                                if nearBottom != isScrolledNearBottom {
+                                                    isScrolledNearBottom = nearBottom
+                                                }
+                                            }
+                                            .onChange(of: session.entries.count) { _, _ in
+                                                guard isScrolledNearBottom else { return }
+                                                if let lastEntry = session.entries.last {
+                                                    let isVerdict: Bool = {
+                                                        if case .verdict = lastEntry { return true }
+                                                        return false
+                                                    }()
+                                                    withAnimation(.easeOut(duration: 0.26)) {
+                                                        if isVerdict {
+                                                            proxy.scrollTo(lastEntry.id, anchor: .top)
+                                                        } else {
+                                                            proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            .onChange(of: session.stage) { _, newStage in
+                                                if newStage == .completed && isScrolledNearBottom {
+                                                    let lastIsVerdict: Bool = {
+                                                        if let last = session.entries.last, case .verdict = last { return true }
+                                                        return false
+                                                    }()
+                                                    if !lastIsVerdict {
+                                                        withAnimation(.easeOut(duration: 0.3)) {
+                                                            proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            .onChange(of: scrollToBottomTrigger) { _, _ in
+                                                withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                                                    proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
+                                                }
+                                            }
+
+                                            // Floating "Scroll to Bottom" Action Pill whenever user scrolls up
+                                            if !isScrolledNearBottom {
+                                                Button {
+                                                    scrollToBottomTrigger += 1
+                                                } label: {
+                                                    HStack(spacing: 7) {
+                                                        if session.stage.isBusy {
+                                                            Circle()
+                                                                .fill(StudioTheme.brassBright)
+                                                                .frame(width: 7, height: 7)
+                                                        }
+                                                        Image(systemName: "arrow.down")
+                                                            .font(.system(size: 11.5, weight: .bold))
+                                                        Text(session.stage.isBusy ? "Jump to Live Turn" : "Scroll to Bottom")
+                                                            .font(.system(size: 12, weight: .semibold))
+                                                    }
+                                                    .foregroundStyle(StudioTheme.inkPrimary)
+                                                    .padding(.horizontal, 14)
+                                                    .padding(.vertical, 8)
+                                                    .background(
+                                                        Capsule(style: .continuous)
+                                                            .fill(StudioTheme.cardElevated.opacity(0.96))
+                                                            .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
+                                                    )
+                                                    .overlay(
+                                                        Capsule(style: .continuous)
+                                                            .strokeBorder(
+                                                                (session.stage.isBusy ? StudioTheme.brassBright : StudioTheme.emerald).opacity(0.55),
+                                                                lineWidth: 1.1
+                                                            )
+                                                    )
+                                                }
+                                                .buttonStyle(.plain)
+                                                .padding(.trailing, horizontalMargin + 6)
+                                                .padding(.bottom, 12)
+                                                .transition(.opacity.combined(with: .move(edge: .bottom)))
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // Floating Composer & Live Audio Transport Bar
-                        StudioComposerDock(
-                            model: model,
-                            session: session,
-                            draftText: $draftPrompt,
-                            isInputFocused: $isComposerFocused
-                        )
-                        .frame(maxWidth: 940)
+                            // Floating Composer & Live Audio Transport Bar (Fluid width matching timeline)
+                            StudioComposerDock(
+                                model: model,
+                                session: session,
+                                draftText: $draftPrompt,
+                                isInputFocused: $isComposerFocused,
+                                onScrollToBottom: {
+                                    scrollToBottomTrigger += 1
+                                }
+                            )
+                            .padding(.horizontal, horizontalMargin)
+                        }
                     }
                 }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .cosignScrollToBottom)) { _ in
+            scrollToBottomTrigger += 1
         }
         .sheet(isPresented: $model.showingPersonaStudio) {
             PersonaStudioSheet(model: model)
@@ -496,6 +597,117 @@ private struct SessionCompletedFinaleCard: View {
                             .strokeBorder(StudioTheme.emerald.opacity(0.34), lineWidth: 1)
                     )
             )
+        }
+    }
+}
+
+// MARK: - Multi-Monitor Window Frame & Screen Persistence Across Restarts
+
+private struct WindowGeometryPersistenceView: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        WindowGeometryObserverView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class WindowGeometryObserverView: NSView {
+    private static let frameDefaultsKey = "Cosign.MainWindowFrameV2"
+    private static let fullScreenDefaultsKey = "Cosign.MainWindowFullScreenV2"
+
+    private weak var observedWindow: NSWindow?
+    private var tokens: [NSObjectProtocol] = []
+    private var isRestoring = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let win = window, win !== observedWindow else { return }
+        tearDownObservers()
+        observedWindow = win
+
+        restoreSavedGeometry(on: win)
+        installObservers(for: win)
+    }
+
+    private func restoreSavedGeometry(on win: NSWindow) {
+        isRestoring = true
+        win.setFrameAutosaveName("CosignStudioMainWindow")
+
+        if let rawFrame = UserDefaults.standard.string(forKey: Self.frameDefaultsKey) {
+            let candidate = NSRectFromString(rawFrame)
+            if candidate.width >= 700 && candidate.height >= 480 {
+                let targetFrame = validatedFrameAcrossMonitors(candidate)
+                win.setFrame(targetFrame, display: true, animate: false)
+                // Apply once more on next runloop tick so SwiftUI's initial `defaultSize` pass never overrides monitor placement!
+                DispatchQueue.main.async { [weak self, weak win] in
+                    if let win {
+                        win.setFrame(targetFrame, display: true, animate: false)
+                        if UserDefaults.standard.bool(forKey: Self.fullScreenDefaultsKey),
+                           !win.styleMask.contains(.fullScreen) {
+                            win.toggleFullScreen(nil)
+                        }
+                    }
+                    self?.isRestoring = false
+                }
+                return
+            }
+        }
+        isRestoring = false
+    }
+
+    private func validatedFrameAcrossMonitors(_ rect: NSRect) -> NSRect {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return rect }
+
+        // Check if at least a 120x80 region of the saved frame is visible on ANY connected monitor
+        for screen in screens {
+            let intersection = rect.intersection(screen.visibleFrame)
+            if intersection.width >= 120 && intersection.height >= 80 {
+                return rect
+            }
+        }
+
+        // External monitor was unplugged — fit cleanly onto primary screen's visible area
+        let fallback = (NSScreen.main ?? screens[0]).visibleFrame
+        let w = min(rect.width, fallback.width)
+        let h = min(rect.height, fallback.height)
+        let x = fallback.minX + (fallback.width - w) * 0.5
+        let y = fallback.minY + (fallback.height - h) * 0.5
+        return NSRect(x: x, y: y, width: w, height: h)
+    }
+
+    private func installObservers(for win: NSWindow) {
+        let nc = NotificationCenter.default
+        let saveHandler: (Notification) -> Void = { [weak self, weak win] _ in
+            guard let self, let win, !self.isRestoring else { return }
+            let isFS = win.styleMask.contains(.fullScreen)
+            UserDefaults.standard.set(isFS, forKey: Self.fullScreenDefaultsKey)
+            if !isFS {
+                let rect = win.frame
+                if rect.width >= 700 && rect.height >= 480 {
+                    UserDefaults.standard.set(NSStringFromRect(rect), forKey: Self.frameDefaultsKey)
+                }
+            }
+        }
+
+        tokens.append(nc.addObserver(forName: NSWindow.didMoveNotification, object: win, queue: .main, using: saveHandler))
+        tokens.append(nc.addObserver(forName: NSWindow.didResizeNotification, object: win, queue: .main, using: saveHandler))
+        tokens.append(nc.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: win, queue: .main, using: saveHandler))
+        tokens.append(nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: win, queue: .main, using: saveHandler))
+        tokens.append(nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: win, queue: .main, using: saveHandler))
+        tokens.append(nc.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main, using: saveHandler))
+    }
+
+    private func tearDownObservers() {
+        for t in tokens {
+            NotificationCenter.default.removeObserver(t)
+        }
+        tokens.removeAll()
+    }
+
+    deinit {
+        for t in tokens {
+            NotificationCenter.default.removeObserver(t)
         }
     }
 }

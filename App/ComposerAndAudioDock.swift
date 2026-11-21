@@ -157,11 +157,12 @@ struct EmptyCouncilWelcomeView: View {
                     }
                 }
             }
-            .frame(maxWidth: 680)
+            .frame(maxWidth: 960)
 
             Spacer(minLength: 20)
         }
         .padding(.horizontal, 28)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -219,6 +220,7 @@ struct StudioComposerDock: View {
     let session: DebateSession
     @Binding var draftText: String
     @FocusState.Binding var isInputFocused: Bool
+    var onScrollToBottom: (() -> Void)? = nil
 
     var body: some View {
         let hasPriorVerdict = session.entries.contains {
@@ -476,6 +478,24 @@ struct StudioComposerDock: View {
 
                 Spacer()
 
+                if !session.entries.isEmpty, let onScrollToBottom {
+                    Button(action: onScrollToBottom) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.to.line")
+                                .font(.system(size: 10, weight: .bold))
+                            Text("Bottom")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundStyle(StudioTheme.inkSecondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4.5)
+                        .background(Capsule().fill(Color.white.opacity(0.055)))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Scroll straight to the bottom of the session (⌘J)")
+                }
+
                 if session.entries.isEmpty && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !session.stage.isBusy {
                     Button {
                         let toSend = draftText
@@ -496,9 +516,9 @@ struct StudioComposerDock: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 11)
         }
+        .frame(maxWidth: .infinity)
         .studioCard(cornerRadius: 20, fill: StudioTheme.dockGlass)
-        .padding(.horizontal, 22)
-        .padding(.bottom, 16)
+        .padding(.bottom, 14)
         .padding(.top, 6)
     }
 }

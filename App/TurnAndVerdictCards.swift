@@ -399,38 +399,46 @@ struct DebateTurnCardView: View {
                     showCues: model.preferences.showVocalTagsInText
                 )
 
-                // Direct Peer Question Banner & CLI Tool Activity Pill
+                // Direct Peer Question Banner & CLI Tool Activity Box (Always bounded cleanly inside card width)
                 if (turn.directQuestionForPeer?.isEmpty == false) || (turn.toolsActivitySummary?.isEmpty == false) {
-                    FlowLayout(spacing: 8, lineSpacing: 6) {
+                    VStack(alignment: .leading, spacing: 6) {
                         if let tools = turn.toolsActivitySummary, !tools.isEmpty {
-                            HStack(spacing: 5) {
+                            HStack(alignment: .top, spacing: 6) {
                                 Image(systemName: turn.stance == .executing ? "hammer.fill" : "terminal.fill")
-                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .font(.system(size: 10, weight: .semibold))
                                     .foregroundStyle(StudioTheme.emerald)
+                                    .padding(.top, 2)
                                 Text(tools)
                                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                                     .foregroundStyle(StudioTheme.inkSecondary)
-                                    .lineLimit(1)
+                                    .lineLimit(2)
+                                    .truncationMode(.tail)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(StudioTheme.emerald.opacity(0.10)))
-                            .overlay(Capsule().strokeBorder(StudioTheme.emerald.opacity(0.24), lineWidth: 0.8))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(StudioTheme.emerald.opacity(0.09)))
+                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(StudioTheme.emerald.opacity(0.24), lineWidth: 0.8))
+                            .help(tools)
                         }
 
                         if let peerQ = turn.directQuestionForPeer, !peerQ.isEmpty {
-                            HStack(spacing: 5) {
+                            HStack(alignment: .top, spacing: 6) {
                                 Image(systemName: "bubble.left.and.exclamationmark.bubble.right.fill")
-                                    .font(.system(size: 9.5))
+                                    .font(.system(size: 10))
                                     .foregroundStyle(StudioTheme.brassBright)
+                                    .padding(.top, 2)
                                 Text("To \(turn.targetPersonaName ?? "Panel"): \"\(peerQ)\"")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(.system(size: 11.5, weight: .medium))
                                     .foregroundStyle(StudioTheme.brassBright)
-                                    .lineLimit(1)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(StudioTheme.brass.opacity(0.12)))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(StudioTheme.brass.opacity(0.11)))
                         }
                     }
                 }
@@ -528,7 +536,9 @@ struct DebateTurnCardView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .studioCard(
             cornerRadius: 16,
             fill: StudioTheme.cardSurface,
@@ -622,104 +632,20 @@ struct CosignVerdictCardView: View {
         let isSpeakingNow = model.voiceEngine.activeItem?.id == verdict.id && model.voiceEngine.isPlaying
 
         VStack(alignment: .leading, spacing: 16) {
-            // Top Emblem & Actions
-            HStack(alignment: .center, spacing: 12) {
-                HStack(spacing: 8) {
-                    ZStack {
-                        Circle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [StudioTheme.brassBright, StudioTheme.brass],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .frame(width: 34, height: 34)
-                            .shadow(color: StudioTheme.brass.opacity(0.45), radius: 8)
-                        Image(systemName: "signature")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(Color(hex: "#090B10"))
-                    }
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("CO-SIGNED COUNCIL ANSWER")
-                            .font(.system(size: 10, weight: .heavy, design: .rounded))
-                            .tracking(1.1)
-                            .foregroundStyle(StudioTheme.brassBright)
-                        Text("Synthesized by \(verdict.moderatorName)")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(StudioTheme.inkMuted)
-                    }
+            // Top Emblem & Actions (Wraps gracefully on narrower windows)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 10) {
+                    verdictEmblemHeader
+                    Spacer(minLength: 10)
+                    verdictActionButtons(isSpeakingNow: isSpeakingNow)
                 }
 
-                Spacer()
-
-                if verdict.wasExecuted == true {
-                    Button {
-                        model.openBuildLaunchSheet(for: verdict)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "checkmark.seal.fill")
-                                .font(.system(size: 10.5))
-                            Text("Built & Verified")
-                        }
-                    }
-                    .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: true))
-                    .disabled(model.currentSession?.stage.isBusy == true)
-                    .help("Project built and verified — click to run another build pass or target a different folder")
-                } else {
-                    Button {
-                        model.openBuildLaunchSheet(for: verdict)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "hammer.fill")
-                                .font(.system(size: 10.5))
-                            Text("Build This Plan…")
-                        }
-                    }
-                    .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.brassBright, active: true))
-                    .disabled(model.currentSession?.stage.isBusy == true)
-                    .help("Select a local folder and have the council build, test, and verify this plan together")
-                }
-
-                Button {
-                    model.openHandoffSheet(for: verdict)
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "terminal.fill")
-                            .font(.system(size: 10.5))
-                        Text("Handoff Prompt")
+                VStack(alignment: .leading, spacing: 10) {
+                    verdictEmblemHeader
+                    FlowLayout(spacing: 8, lineSpacing: 8) {
+                        verdictActionButtons(isSpeakingNow: isSpeakingNow)
                     }
                 }
-                .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: true))
-                .help("Build and copy a coding-harness handoff prompt with all recommendations while keeping this conversation live")
-
-                Button {
-                    model.replayVerdict(verdict)
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: isSpeakingNow ? "waveform" : "speaker.wave.2.fill")
-                            .font(.system(size: 11))
-                        Text("Speak")
-                    }
-                }
-                .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.brassBright, active: isSpeakingNow))
-
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(verdict.markdownFormatted, forType: .string)
-                    copied = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                        copied = false
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11))
-                        Text(copied ? "Copied" : "Copy Markdown")
-                    }
-                }
-                .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: copied))
             }
 
             // Editorial Headline
@@ -1036,12 +962,113 @@ struct CosignVerdictCardView: View {
             }
         }
         .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .studioCard(
             cornerRadius: 20,
             fill: Color(hex: "#141926"),
             glowColor: StudioTheme.brass,
             glowIntensity: isSpeakingNow ? 0.36 : 0.18
         )
+    }
+
+    private var verdictEmblemHeader: some View {
+        HStack(spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [StudioTheme.brassBright, StudioTheme.brass],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 34, height: 34)
+                    .shadow(color: StudioTheme.brass.opacity(0.45), radius: 8)
+                Image(systemName: "signature")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color(hex: "#090B10"))
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("CO-SIGNED COUNCIL ANSWER")
+                    .font(.system(size: 10, weight: .heavy, design: .rounded))
+                    .tracking(1.1)
+                    .foregroundStyle(StudioTheme.brassBright)
+                Text("Synthesized by \(verdict.moderatorName)")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(StudioTheme.inkMuted)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func verdictActionButtons(isSpeakingNow: Bool) -> some View {
+        if verdict.wasExecuted == true {
+            Button {
+                model.openBuildLaunchSheet(for: verdict)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 10.5))
+                    Text("Built & Verified")
+                }
+            }
+            .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: true))
+            .disabled(model.currentSession?.stage.isBusy == true)
+            .help("Project built and verified — click to run another build pass or target a different folder")
+        } else {
+            Button {
+                model.openBuildLaunchSheet(for: verdict)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "hammer.fill")
+                        .font(.system(size: 10.5))
+                    Text("Build This Plan…")
+                }
+            }
+            .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.brassBright, active: true))
+            .disabled(model.currentSession?.stage.isBusy == true)
+            .help("Select a local folder and have the council build, test, and verify this plan together")
+        }
+
+        Button {
+            model.openHandoffSheet(for: verdict)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 10.5))
+                Text("Handoff Prompt")
+            }
+        }
+        .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: true))
+        .help("Build and copy a coding-harness handoff prompt with all recommendations while keeping this conversation live")
+
+        Button {
+            model.replayVerdict(verdict)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: isSpeakingNow ? "waveform" : "speaker.wave.2.fill")
+                    .font(.system(size: 11))
+                Text("Speak")
+            }
+        }
+        .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.brassBright, active: isSpeakingNow))
+
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(verdict.markdownFormatted, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                copied = false
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11))
+                Text(copied ? "Copied" : "Copy Markdown")
+            }
+        }
+        .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: copied))
     }
 }
 
@@ -1258,7 +1285,7 @@ struct HandoffPromptSheet: View {
                 }
             }
         }
-        .frame(width: 940, height: 660)
+        .frame(minWidth: 740, idealWidth: 960, maxWidth: .infinity, minHeight: 520, idealHeight: 680, maxHeight: .infinity)
         .background(StudioTheme.canvasTop)
         .preferredColorScheme(.dark)
         .onAppear {
@@ -1451,7 +1478,7 @@ struct BuildLaunchSheet: View {
             }
             .padding(22)
         }
-        .frame(width: 640, height: 420)
+        .frame(minWidth: 560, idealWidth: 660, maxWidth: .infinity, minHeight: 400, idealHeight: 440, maxHeight: .infinity)
         .background(StudioTheme.canvasTop)
         .preferredColorScheme(.dark)
         .onAppear {
