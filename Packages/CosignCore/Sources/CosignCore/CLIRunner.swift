@@ -7,6 +7,8 @@ public struct ModelCallRequest: Sendable {
     public var systemPrompt: String
     public var userPrompt: String
     public var allowWebSearch: Bool
+    public var toolPhase: ToolExecutionPhase
+    public var workspacePath: String?
     public var openRouterAPIKey: String?
 
     public init(
@@ -15,7 +17,9 @@ public struct ModelCallRequest: Sendable {
         effort: ReasoningEffort,
         systemPrompt: String,
         userPrompt: String,
-        allowWebSearch: Bool = false,
+        allowWebSearch: Bool = true,
+        toolPhase: ToolExecutionPhase = .researchAndInspect,
+        workspacePath: String? = nil,
         openRouterAPIKey: String? = nil
     ) {
         self.provider = provider
@@ -24,6 +28,8 @@ public struct ModelCallRequest: Sendable {
         self.systemPrompt = systemPrompt
         self.userPrompt = userPrompt
         self.allowWebSearch = allowWebSearch
+        self.toolPhase = toolPhase
+        self.workspacePath = workspacePath
         self.openRouterAPIKey = openRouterAPIKey
     }
 }
@@ -65,27 +71,14 @@ public protocol ModelRunnerProtocol: Sendable {
     func call(_ request: ModelCallRequest) async throws -> ModelCallResponse
 }
 
-/// Runs isolated, context-free calls through subscription CLIs (`claude`, `codex`, `agy`) and optional OpenRouter.
-/// Never leaks user skills, memories, MCP tools, or host session variables into persona prompts.
+/// Runs headless calls through subscription CLIs (`claude`, `codex`, `agy`) and optional OpenRouter.
+/// Supports three tool modes:
+/// - `.closedBook`: isolated no-tool reasoning
+/// - `.researchAndInspect`: full CLI read/inspection tools (local repos, `git`, `gh`, MCP, web) with file edits blocked
+/// - `.coordinatedReadWrite`: full read + write + shell execution (used one persona at a time under Chair coordination)
 public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
     private let realHome: URL
     private let maxRetries: Int
-
-    private static let authFiles: [AIProvider: [String]] = [
-        .codex: [
-            ".codex/auth.json"
-        ],
-        .agy: [
-            ".gemini/google_accounts.json",
-            ".gemini/installation_id",
-            ".gemini/oauth_creds.json",
-            ".gemini/settings.json",
-            ".gemini/jetski-standalone-oauth-token",
-            ".gemini/antigravity-cli/antigravity-oauth-token",
-            ".gemini/antigravity-cli/installation_id",
-            ".gemini/antigravity-cli/settings.json",
-        ]
-    ]
 
     public init(
         realHome: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -129,39 +122,73 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         throw lastError ?? ModelRunnerError.processFailed("Model call failed.")
     }
 
+    private func resolveWorkingDirectory(for req: ModelCallRequest) -> (url: URL, cleanupAfter: Bool) {
+        if req.toolPhase == .closedBook {
+            if let tmp = try? makeTempDir(prefix: "cosign-closed-") {
+                return (tmp, true)
+            }
+        }
+        if let ws = req.workspacePath, !ws.isEmpty {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: ws, isDirectory: &isDir), isDir.boolValue {
+                return (URL(fileURLWithPath: ws), false)
+            }
+        }
+        let fallback = WorkspaceResolver.defaultWorkspacePath(home: realHome)
+        return (URL(fileURLWithPath: fallback), false)
+    }
+
     // MARK: - Claude Subscription CLI
 
     private func callClaude(_ req: ModelCallRequest) async throws -> String {
         guard let binary = BinaryLocator.findBinary("claude", home: realHome) else {
             throw ModelRunnerError.binaryNotFound(.claude)
         }
-        let tools = req.allowWebSearch ? "WebSearch,WebFetch" : ""
-        var args = [
+
+        let (cwd, shouldClean) = resolveWorkingDirectory(for: req)
+        defer { if shouldClean { try? FileManager.default.removeItem(at: cwd) } }
+
+        var args: [String] = [
             "-p",
             "--model", req.modelID,
             "--effort", req.effort.rawValue,
             "--output-format", "json",
             "--system-prompt", req.systemPrompt,
-            "--tools", tools,
-            "--safe-mode",
-            "--setting-sources", "",
-            "--strict-mcp-config",
             "--disable-slash-commands",
             "--no-session-persistence",
         ]
-        if req.allowWebSearch {
-            args += ["--allowedTools", tools]
-        }
 
-        let tempCwd = try makeTempDir(prefix: "cosign-claude-")
-        defer { try? FileManager.default.removeItem(at: tempCwd) }
+        switch req.toolPhase {
+        case .closedBook:
+            let tools = req.allowWebSearch ? "WebSearch,WebFetch" : ""
+            args += ["--tools", tools, "--safe-mode", "--setting-sources", "", "--strict-mcp-config"]
+            if req.allowWebSearch {
+                args += ["--allowedTools", tools]
+            }
+        case .researchAndInspect:
+            args += [
+                "--tools", "default",
+                "--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit",
+                "--dangerously-skip-permissions",
+            ]
+            for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
+                args += ["--add-dir", extra]
+            }
+        case .coordinatedReadWrite:
+            args += [
+                "--tools", "default",
+                "--dangerously-skip-permissions",
+            ]
+            for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
+                args += ["--add-dir", extra]
+            }
+        }
 
         let out = try await runSubprocess(
             executable: binary,
             arguments: args,
-            cwd: tempCwd,
+            cwd: cwd,
             stdinText: req.userPrompt,
-            isolatedHome: nil,
             label: "claude/\(req.modelID)"
         )
 
@@ -187,47 +214,64 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         guard let binary = BinaryLocator.findBinary("codex", home: realHome) else {
             throw ModelRunnerError.binaryNotFound(.codex)
         }
-        var fullPrompt = "\(req.systemPrompt)\n\n---\n\n\(req.userPrompt)"
-        if !req.allowWebSearch {
-            fullPrompt += "\n\nDo not use any tools, files, or web search for this reply."
-        }
-        // Codex maps max -> xhigh if needed
-        let effortValue = req.effort == .max ? "xhigh" : req.effort.rawValue
 
-        return try await withIsolatedHome(for: .codex) { home in
-            let workDir = home.appendingPathComponent("work")
-            let lastFile = home.appendingPathComponent("last.txt")
-            var args: [String] = []
-            if req.allowWebSearch {
-                args.append("--search")
+        let (cwd, shouldClean) = resolveWorkingDirectory(for: req)
+        defer { if shouldClean { try? FileManager.default.removeItem(at: cwd) } }
+
+        let tempOutDir = try makeTempDir(prefix: "cosign-codex-out-")
+        defer { try? FileManager.default.removeItem(at: tempOutDir) }
+        let lastFile = tempOutDir.appendingPathComponent("last.txt")
+
+        var fullPrompt = "\(req.systemPrompt)\n\n---\n\n\(req.userPrompt)"
+        switch req.toolPhase {
+        case .closedBook:
+            if !req.allowWebSearch {
+                fullPrompt += "\n\nDo not use any tools, files, or web search for this reply."
             }
-            args += [
-                "exec",
-                "-m", req.modelID,
-                "-c", "model_reasoning_effort=\"\(effortValue)\"",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--ephemeral",
-                "-s", "read-only",
-                "-C", workDir.path,
-                "-o", lastFile.path,
-                "-",
-            ]
-            _ = try await self.runSubprocess(
-                executable: binary,
-                arguments: args,
-                cwd: workDir,
-                stdinText: fullPrompt,
-                isolatedHome: home,
-                label: "codex/\(req.modelID)"
-            )
-            let text = (try? String(contentsOf: lastFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !text.isEmpty else {
-                throw ModelRunnerError.emptyResponse("codex/\(req.modelID)")
-            }
-            return text
+        case .researchAndInspect:
+            fullPrompt += "\n\nTOOL ACCESS: You have full read/research access to local repos (working directory: \(cwd.path)), `git`, `gh` (GitHub CLI), MCP servers, and web search. STRICT RULE FOR THIS DEBATE TURN: Do NOT edit, write, create, or delete any files—only inspect, read, and research."
+        case .coordinatedReadWrite:
+            fullPrompt += "\n\nTOOL ACCESS: You are the Chair-designated executor for this turn with full read + write + shell access in \(cwd.path)."
         }
+
+        let effortValue = req.effort == .max ? "xhigh" : req.effort.rawValue
+        var args: [String] = []
+        if req.allowWebSearch || req.toolPhase != .closedBook {
+            args.append("--search")
+        }
+        args += [
+            "exec",
+            "-m", req.modelID,
+            "-c", "model_reasoning_effort=\"\(effortValue)\"",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "-C", cwd.path,
+            "-o", lastFile.path,
+        ]
+
+        switch req.toolPhase {
+        case .closedBook:
+            args += ["--ignore-user-config", "--ignore-rules", "-s", "read-only"]
+        case .researchAndInspect, .coordinatedReadWrite:
+            args += ["--dangerously-bypass-approvals-and-sandbox"]
+            for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
+                args += ["--add-dir", extra]
+            }
+        }
+        args.append("-")
+
+        _ = try await runSubprocess(
+            executable: binary,
+            arguments: args,
+            cwd: cwd,
+            stdinText: fullPrompt,
+            label: "codex/\(req.modelID)"
+        )
+        let text = (try? String(contentsOf: lastFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !text.isEmpty else {
+            throw ModelRunnerError.emptyResponse("codex/\(req.modelID)")
+        }
+        return text
     }
 
     // MARK: - AGY (Gemini Ultra Subscription CLI)
@@ -236,27 +280,53 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         guard let binary = BinaryLocator.findBinary("agy", home: realHome) else {
             throw ModelRunnerError.binaryNotFound(.agy)
         }
+
+        let (cwd, shouldClean) = resolveWorkingDirectory(for: req)
+        defer { if shouldClean { try? FileManager.default.removeItem(at: cwd) } }
+
         var fullPrompt = "\(req.systemPrompt)\n\n---\n\n\(req.userPrompt)"
-        if !req.allowWebSearch {
-            fullPrompt += "\n\nDo not use any tools, files, or web search for this reply."
+        switch req.toolPhase {
+        case .closedBook:
+            if !req.allowWebSearch {
+                fullPrompt += "\n\nDo not use any tools, files, or web search for this reply."
+            }
+        case .researchAndInspect:
+            fullPrompt += "\n\nTOOL ACCESS: You have full read/inspection access to local repos (working directory: \(cwd.path)), `git`, `gh` (GitHub CLI), and web search. Do NOT edit or modify files during this debate turn."
+        case .coordinatedReadWrite:
+            fullPrompt += "\n\nTOOL ACCESS: You are the Chair-designated executor for this turn with full read + write + command access in \(cwd.path)."
         }
-        let args = [
+
+        var args = [
             "-p", fullPrompt,
             "--model", req.modelID,
             "--effort", req.effort.rawValue,
             "--output-format", "json",
             "--disable-slash-commands",
         ]
-        let out = try await withIsolatedHome(for: .agy) { home in
-            try await self.runSubprocess(
-                executable: binary,
-                arguments: args,
-                cwd: home.appendingPathComponent("work"),
-                stdinText: nil,
-                isolatedHome: home,
-                label: "agy/\(req.modelID)"
-            )
+
+        switch req.toolPhase {
+        case .closedBook:
+            args += ["--mode", "plan"]
+        case .researchAndInspect:
+            args += ["--dangerously-skip-permissions", "--mode", "plan"]
+            for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
+                args += ["--add-dir", extra]
+            }
+        case .coordinatedReadWrite:
+            args += ["--dangerously-skip-permissions", "--mode", "auto"]
+            for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
+                args += ["--add-dir", extra]
+            }
         }
+
+        let out = try await runSubprocess(
+            executable: binary,
+            arguments: args,
+            cwd: cwd,
+            stdinText: nil,
+            label: "agy/\(req.modelID)"
+        )
+
         guard let data = out.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -311,7 +381,7 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         return content
     }
 
-    // MARK: - Isolated Home & Subprocess Execution
+    // MARK: - Clean Environment & Subprocess Execution
 
     private func makeTempDir(prefix: String) throws -> URL {
         let base = FileManager.default.temporaryDirectory
@@ -320,58 +390,16 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         return dir
     }
 
-    private func withIsolatedHome<T>(for provider: AIProvider, body: @escaping (URL) async throws -> T) async throws -> T {
-        let fm = FileManager.default
-        let tempHome = try makeTempDir(prefix: "cosign-\(provider.rawValue)-")
-        let files = Self.authFiles[provider] ?? []
-
-        for rel in files {
-            let src = realHome.appendingPathComponent(rel)
-            if fm.fileExists(atPath: src.path) {
-                let dst = tempHome.appendingPathComponent(rel)
-                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try? fm.copyItem(at: src, to: dst)
-            }
-        }
-        let workDir = tempHome.appendingPathComponent("work")
-        try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
-
-        defer {
-            // Sync refreshed OAuth tokens back to real HOME if rewritten during the call
-            for rel in files {
-                let newFile = tempHome.appendingPathComponent(rel)
-                let realFile = realHome.appendingPathComponent(rel)
-                if fm.fileExists(atPath: newFile.path), fm.fileExists(atPath: realFile.path),
-                   let newAttrs = try? fm.attributesOfItem(atPath: newFile.path),
-                   let realAttrs = try? fm.attributesOfItem(atPath: realFile.path),
-                   let newDate = newAttrs[.modificationDate] as? Date,
-                   let realDate = realAttrs[.modificationDate] as? Date,
-                   newDate > realDate,
-                   let newData = try? Data(contentsOf: newFile),
-                   let realData = try? Data(contentsOf: realFile),
-                   newData != realData {
-                    try? newData.write(to: realFile, options: .atomic)
-                }
-            }
-            try? fm.removeItem(at: tempHome)
-        }
-
-        return try await body(tempHome)
-    }
-
-    private func cleanEnvironment(isolatedHome: URL?) -> [String: String] {
+    private func cleanEnvironment() -> [String: String] {
+        // Strip host AI-session nesting vars while keeping real HOME, Keychain, SSH, and `gh` GitHub auth intact!
         let blockedPrefixes = ["CLAUDE", "ANTHROPIC", "CODEX_", "OPENAI_"]
         var env: [String: String] = [:]
         for (k, v) in ProcessInfo.processInfo.environment {
             if blockedPrefixes.contains(where: { k.hasPrefix($0) }) { continue }
             env[k] = v
         }
+        env["HOME"] = realHome.path
         env["PATH"] = BinaryLocator.augmentedPATH(home: realHome)
-        if let isolatedHome {
-            env["HOME"] = isolatedHome.path
-            env.removeValue(forKey: "XDG_CONFIG_HOME")
-            env.removeValue(forKey: "XDG_DATA_HOME")
-        }
         return env
     }
 
@@ -380,14 +408,13 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         arguments: [String],
         cwd: URL,
         stdinText: String?,
-        isolatedHome: URL?,
         label: String
     ) async throws -> String {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = arguments
         proc.currentDirectoryURL = cwd
-        proc.environment = cleanEnvironment(isolatedHome: isolatedHome)
+        proc.environment = cleanEnvironment()
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -406,7 +433,6 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                // Collect stdout/stderr asynchronously so large outputs never block pipe buffers
                 let buffers = LockedBox((out: Data(), err: Data()))
 
                 outPipe.fileHandleForReading.readabilityHandler = { handle in

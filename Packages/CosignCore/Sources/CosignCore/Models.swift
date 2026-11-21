@@ -245,15 +245,27 @@ public struct PanelPreset: Identifiable, Codable, Hashable, Sendable {
 
 // MARK: - Debate Timeline & Turns
 
+public enum ToolExecutionPhase: String, Codable, Sendable {
+    /// Pure fast reasoning with zero filesystem, shell, or web tools.
+    case closedBook
+    /// Full CLI research & inspection tools (Read, Glob, Grep, git, gh, MCP read, web search) — file writes blocked so parallel debaters never collide.
+    case researchAndInspect
+    /// Full read + write + execute CLI access — unlocked sequentially for ONE persona at a time under Chair coordination.
+    case coordinatedReadWrite
+}
+
 public enum StanceKind: String, Codable, CaseIterable, Sendable {
     case intake
     case opening
     case challenging
+    case replying
     case building
     case conceding
+    case moderating
     case synthesizing
     case cosigning
     case dissenting
+    case executing
     case followup
 
     public var label: String {
@@ -261,11 +273,14 @@ public enum StanceKind: String, Codable, CaseIterable, Sendable {
         case .intake: return "Clarifying"
         case .opening: return "Opening Stance"
         case .challenging: return "Challenging"
+        case .replying: return "Answering"
         case .building: return "Building On"
         case .conceding: return "Conceding Point"
+        case .moderating: return "Directing Floor"
         case .synthesizing: return "Synthesizing"
         case .cosigning: return "Co-Signing"
         case .dissenting: return "Holding Dissent"
+        case .executing: return "Coordinated Edit"
         case .followup: return "Follow-Up"
         }
     }
@@ -275,11 +290,14 @@ public enum StanceKind: String, Codable, CaseIterable, Sendable {
         case .intake: return "questionmark.bubble.fill"
         case .opening: return "sparkle"
         case .challenging: return "bolt.fill"
+        case .replying: return "arrowshape.turn.up.left.fill"
         case .building: return "plus.circle.fill"
         case .conceding: return "arrow.uturn.right.circle.fill"
+        case .moderating: return "person.wave.2.fill"
         case .synthesizing: return "wand.and.stars"
         case .cosigning: return "checkmark.seal.fill"
         case .dissenting: return "exclamationmark.triangle.fill"
+        case .executing: return "hammer.circle.fill"
         case .followup: return "bubble.left.and.bubble.right.fill"
         }
     }
@@ -375,6 +393,10 @@ public struct DebateTurn: Identifiable, Codable, Hashable, Sendable {
     public var thoughtProcess: String
     /// Crisp bullet takeaways inside the drawer.
     public var keyPoints: [String]
+    /// Direct question or challenge posed to another seated persona so the Chair can hand them the mic.
+    public var directQuestionForPeer: String?
+    /// Short summary of CLI tools/files/repos inspected or modified during this turn.
+    public var toolsActivitySummary: String?
     public var durationMs: Int
     public var createdAt: Date
 
@@ -394,6 +416,8 @@ public struct DebateTurn: Identifiable, Codable, Hashable, Sendable {
         spokenTake: String,
         thoughtProcess: String,
         keyPoints: [String] = [],
+        directQuestionForPeer: String? = nil,
+        toolsActivitySummary: String? = nil,
         durationMs: Int = 0,
         createdAt: Date = Date()
     ) {
@@ -412,6 +436,8 @@ public struct DebateTurn: Identifiable, Codable, Hashable, Sendable {
         self.spokenTake = spokenTake
         self.thoughtProcess = thoughtProcess
         self.keyPoints = keyPoints
+        self.directQuestionForPeer = directQuestionForPeer
+        self.toolsActivitySummary = toolsActivitySummary
         self.durationMs = durationMs
         self.createdAt = createdAt
     }
@@ -439,6 +465,25 @@ public struct MinorityDissent: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+public struct ExecutionAssignment: Identifiable, Codable, Hashable, Sendable {
+    public var id: UUID
+    public var assignedPersonaName: String
+    public var taskInstruction: String
+    public var targetScope: String
+
+    public init(
+        id: UUID = UUID(),
+        assignedPersonaName: String,
+        taskInstruction: String,
+        targetScope: String = ""
+    ) {
+        self.id = id
+        self.assignedPersonaName = assignedPersonaName
+        self.taskInstruction = taskInstruction
+        self.targetScope = targetScope
+    }
+}
+
 public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var moderatorID: UUID
@@ -452,6 +497,9 @@ public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
     public var cosignedNames: [String]
     public var dissents: [MinorityDissent]
     public var moderatorThoughtProcess: String
+    public var shouldAutoExecute: Bool?
+    public var executionAssignments: [ExecutionAssignment]?
+    public var wasExecuted: Bool?
     public var createdAt: Date
 
     public init(
@@ -467,6 +515,9 @@ public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
         cosignedNames: [String] = [],
         dissents: [MinorityDissent] = [],
         moderatorThoughtProcess: String = "",
+        shouldAutoExecute: Bool? = false,
+        executionAssignments: [ExecutionAssignment]? = nil,
+        wasExecuted: Bool? = false,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -481,6 +532,9 @@ public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
         self.cosignedNames = cosignedNames
         self.dissents = dissents
         self.moderatorThoughtProcess = moderatorThoughtProcess
+        self.shouldAutoExecute = shouldAutoExecute
+        self.executionAssignments = executionAssignments
+        self.wasExecuted = wasExecuted
         self.createdAt = createdAt
     }
 
@@ -571,13 +625,14 @@ public enum SessionStage: String, Codable, Sendable {
     case awaitingInterviewAnswers
     case debating
     case synthesizingVerdict
+    case executingPlan
     case completed
     case cancelled
     case error
 
     public var isBusy: Bool {
         switch self {
-        case .scanningIntake, .debating, .synthesizingVerdict:
+        case .scanningIntake, .debating, .synthesizingVerdict, .executingPlan:
             return true
         default:
             return false
@@ -594,8 +649,16 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
     public var debaterIDs: [UUID]
     public var maxRebuttalRounds: Int
     public var allowWebSearch: Bool
+    /// When true (default), personas have full CLI tools (repo/disk read, git, gh, MCP, web) and Chair-coordinated writes.
+    public var cliToolsEnabled: Bool?
+    /// Active working directory for CLI tools (e.g. a specific repo or repos parent folder).
+    public var workspacePath: String?
     public var stage: SessionStage
     public var entries: [TimelineEntry]
+
+    public var hasFullCLITools: Bool {
+        cliToolsEnabled ?? true
+    }
 
     public init(
         id: UUID = UUID(),
@@ -605,7 +668,9 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
         moderatorID: UUID,
         debaterIDs: [UUID],
         maxRebuttalRounds: Int = 2,
-        allowWebSearch: Bool = false,
+        allowWebSearch: Bool = true,
+        cliToolsEnabled: Bool? = true,
+        workspacePath: String? = nil,
         stage: SessionStage = .idle,
         entries: [TimelineEntry] = []
     ) {
@@ -617,6 +682,8 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
         self.debaterIDs = debaterIDs
         self.maxRebuttalRounds = maxRebuttalRounds
         self.allowWebSearch = allowWebSearch
+        self.cliToolsEnabled = cliToolsEnabled
+        self.workspacePath = workspacePath
         self.stage = stage
         self.entries = entries
     }

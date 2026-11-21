@@ -6,7 +6,8 @@ Instead of dumping walls of homogeneous text from a single model, Cosign intervi
 
 ## Highlights
 
-- **Subscription-Backed Frontier Diversity:** Runs `claude`, `codex`, and `agy` inside isolated temporary `HOME` sandboxes so your personal skills, memories, and host sessions never pollute persona prompts—while automatically syncing refreshed OAuth tokens.
+- **Full Subscription CLI & Repo/GitHub Tools:** Personas run `claude`, `codex`, and `agy` against your active workspace folder (with automatic multi-root repo discovery, `git`, `gh` for GitHub, MCP servers, and web search).
+- **Chair-Directed Live Dialogue & Coordinated Edits:** Panelists challenge and question each other directly on the floor moderated by **Vera (The Chair)**. During debates, file-edit tools are locked out so parallel agents never collide; once a verdict is reached (or when you click **Execute Plan**), **Vera coordinates sequential single-writer execution** across the council.
 - **Live Provider Model Discovery:** Automatically surfaces the latest models available on each subscription (`agy models`, Codex model cache, Claude model catalog, and optional OpenRouter) right inside the **Persona Studio**.
 - **Smart Intake Interview → Automatic Debate → Co-Sign:** Deduplicates missing context into 1–3 high-impact questions (with 1-click option chips, freeform/dictated replies, or *"Not sure — debate this for me"*), then flows automatically through Blind Openings, Cross-Examination, and Verdict.
 - **Compact Two-Layer Cards:** Every turn displays a crisp 2–4 sentence spoken take in the main stream, with a 1-click expandable **Thought Process** drawer underneath so full reasoning is always transparent without clutter.

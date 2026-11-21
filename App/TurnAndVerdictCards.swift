@@ -399,6 +399,42 @@ struct DebateTurnCardView: View {
                     showCues: model.preferences.showVocalTagsInText
                 )
 
+                // Direct Peer Question Banner & CLI Tool Activity Pill
+                if (turn.directQuestionForPeer?.isEmpty == false) || (turn.toolsActivitySummary?.isEmpty == false) {
+                    FlowLayout(spacing: 8, lineSpacing: 6) {
+                        if let tools = turn.toolsActivitySummary, !tools.isEmpty {
+                            HStack(spacing: 5) {
+                                Image(systemName: turn.stance == .executing ? "hammer.fill" : "terminal.fill")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .foregroundStyle(StudioTheme.emerald)
+                                Text(tools)
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(StudioTheme.inkSecondary)
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(StudioTheme.emerald.opacity(0.10)))
+                            .overlay(Capsule().strokeBorder(StudioTheme.emerald.opacity(0.24), lineWidth: 0.8))
+                        }
+
+                        if let peerQ = turn.directQuestionForPeer, !peerQ.isEmpty {
+                            HStack(spacing: 5) {
+                                Image(systemName: "bubble.left.and.exclamationmark.bubble.right.fill")
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(StudioTheme.brassBright)
+                                Text("To \(turn.targetPersonaName ?? "Panel"): \"\(peerQ)\"")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(StudioTheme.brassBright)
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(StudioTheme.brass.opacity(0.12)))
+                        }
+                    }
+                }
+
                 // LAYER 2: 1-Click Collapsible Thought Process & Key Takeaways Drawer
                 if !turn.thoughtProcess.isEmpty || !turn.keyPoints.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -505,16 +541,17 @@ struct DebateTurnCardView: View {
     private func stancePill(accent: Color) -> some View {
         let pillColor: Color = {
             switch turn.stance {
-            case .cosigning, .conceding: return StudioTheme.emerald
+            case .cosigning, .conceding, .executing: return StudioTheme.emerald
             case .dissenting: return StudioTheme.crimson
-            case .challenging: return StudioTheme.brassBright
+            case .challenging, .moderating: return StudioTheme.brassBright
+            case .replying: return StudioTheme.sky
             default: return accent
             }
         }()
 
         let text: String = {
             if let target = turn.targetPersonaName, !target.isEmpty,
-               turn.stance == .challenging || turn.stance == .building || turn.stance == .conceding {
+               turn.stance == .challenging || turn.stance == .replying || turn.stance == .building || turn.stance == .conceding {
                 return "\(turn.stance.label) \(target)"
             }
             return turn.stance.label
@@ -613,6 +650,32 @@ struct CosignVerdictCardView: View {
                 }
 
                 Spacer()
+
+                if verdict.wasExecuted == true {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11))
+                        Text("Edits Executed")
+                    }
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(StudioTheme.emerald)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5.5)
+                    .background(Capsule().fill(StudioTheme.emerald.opacity(0.14)))
+                } else if model.currentSession?.hasFullCLITools == true {
+                    Button {
+                        model.executeVerdict(verdict)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "hammer.fill")
+                                .font(.system(size: 10.5))
+                            Text("Execute Plan")
+                        }
+                    }
+                    .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.brassBright, active: true))
+                    .disabled(model.currentSession?.stage.isBusy == true)
+                    .help("Have \(verdict.moderatorName) coordinate executing these agreed changes sequentially across the council")
+                }
 
                 Button {
                     model.replayVerdict(verdict)

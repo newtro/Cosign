@@ -283,6 +283,19 @@ struct StudioComposerDock: View {
 
             // Bottom Micro-Controls Bar
             HStack(spacing: 10) {
+                // Full CLI Tools + Chair Edits Toggle
+                Button {
+                    model.setCurrentSessionCLITools(!session.hasFullCLITools)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: session.hasFullCLITools ? "hammer.fill" : "lock.fill")
+                            .font(.system(size: 10.5))
+                        Text(session.hasFullCLITools ? "Full CLI + Chair Edits" : "Closed-Book")
+                    }
+                }
+                .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: session.hasFullCLITools))
+                .help("When enabled, all personas can inspect local repos & GitHub via CLI tools, and The Chair coordinates sequential file edits")
+
                 // Web Search Toggle
                 Button {
                     model.setCurrentSessionWebSearch(!session.allowWebSearch)
@@ -290,7 +303,7 @@ struct StudioComposerDock: View {
                     HStack(spacing: 5) {
                         Image(systemName: "globe")
                             .font(.system(size: 10.5))
-                        Text(session.allowWebSearch ? "Web Search On" : "Closed-Book")
+                        Text(session.allowWebSearch ? "Web On" : "Web Off")
                     }
                 }
                 .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: session.allowWebSearch))

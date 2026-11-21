@@ -1,10 +1,46 @@
 import Foundation
 
+public enum WorkspaceResolver {
+    public static func defaultWorkspacePath(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String {
+        let fm = FileManager.default
+        let candidates = [
+            "/Volumes/Cache/repos",
+            home.appendingPathComponent("repos").path,
+            home.appendingPathComponent("Developer").path,
+            home.path,
+        ]
+        for path in candidates {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                return path
+            }
+        }
+        return home.path
+    }
+
+    public static func additionalRepoRoots(excluding primary: String?, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String] {
+        let fm = FileManager.default
+        let candidates = [
+            "/Volumes/Cache/repos",
+            "/Volumes/Data 1/Repos",
+            home.appendingPathComponent("repos").path,
+        ]
+        return candidates.filter { path in
+            guard path != primary else { return false }
+            var isDir: ObjCBool = false
+            return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+        }
+    }
+}
+
 public struct AppPreferences: Codable, Sendable {
     public var autoSpeakResponses: Bool
     public var playbackSpeed: Double
     public var defaultMaxRebuttalRounds: Int
     public var defaultAllowWebSearch: Bool
+    public var defaultCLIToolsEnabled: Bool?
+    public var defaultWorkspacePath: String?
+    public var recentWorkspacePaths: [String]?
     public var showVocalTagsInText: Bool
     public var activePresetID: UUID?
 
@@ -12,7 +48,10 @@ public struct AppPreferences: Codable, Sendable {
         autoSpeakResponses: Bool = true,
         playbackSpeed: Double = 1.08,
         defaultMaxRebuttalRounds: Int = 2,
-        defaultAllowWebSearch: Bool = false,
+        defaultAllowWebSearch: Bool = true,
+        defaultCLIToolsEnabled: Bool? = true,
+        defaultWorkspacePath: String? = WorkspaceResolver.defaultWorkspacePath(),
+        recentWorkspacePaths: [String]? = nil,
         showVocalTagsInText: Bool = true,
         activePresetID: UUID? = DefaultRoster.coreCouncilPresetID
     ) {
@@ -20,6 +59,9 @@ public struct AppPreferences: Codable, Sendable {
         self.playbackSpeed = playbackSpeed
         self.defaultMaxRebuttalRounds = defaultMaxRebuttalRounds
         self.defaultAllowWebSearch = defaultAllowWebSearch
+        self.defaultCLIToolsEnabled = defaultCLIToolsEnabled
+        self.defaultWorkspacePath = defaultWorkspacePath
+        self.recentWorkspacePaths = recentWorkspacePaths
         self.showVocalTagsInText = showVocalTagsInText
         self.activePresetID = activePresetID
     }

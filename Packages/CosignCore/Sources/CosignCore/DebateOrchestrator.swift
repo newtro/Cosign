@@ -20,7 +20,7 @@ public enum OrchestratorEvent: Sendable {
     case enqueueSpeech(SpeechQueueItem)
 }
 
-/// Drives the automatic "Intake Interview → Parallel Blind Openings → Cross-Examination → Co-Signed Verdict" flow.
+/// Drives Intake Interview → Parallel Blind Investigation → Chair-Moderated Inter-Persona Debate → Co-Signed Verdict → Chair-Coordinated Sequential Execution.
 public final class DebateOrchestrator: Sendable {
     private let runner: ModelRunnerProtocol
 
@@ -28,9 +28,10 @@ public final class DebateOrchestrator: Sendable {
         self.runner = runner
     }
 
-    /// Starts a brand-new user prompt on the session.
-    /// - If this is the initial prompt and key context is missing, pauses at `awaitingInterviewAnswers`.
-    /// - Otherwise runs straight through the debate rounds to a Co-Signed Verdict.
+    private func researchPhase(for session: DebateSession) -> ToolExecutionPhase {
+        session.hasFullCLITools ? .researchAndInspect : .closedBook
+    }
+
     public func submitUserMessage(
         text: String,
         into initialSession: DebateSession,
@@ -54,7 +55,7 @@ public final class DebateOrchestrator: Sendable {
         session.updatedAt = Date()
         await onEvent(.sessionUpdated(session))
 
-        // If user explicitly @mentioned a single persona in a follow-up, let that persona answer directly + optional quick reactions
+        // Direct @Persona follow-up (with single-agent write lock if CLI tools are enabled!)
         if hadPriorVerdict, let targeted = detectDirectMention(in: trimmed, personas: [moderator] + debaters) {
             return try await runDirectFollowUp(
                 target: targeted,
@@ -67,20 +68,32 @@ public final class DebateOrchestrator: Sendable {
             )
         }
 
-        // Step 1: Intake Triage & Clarifying Interview (on initial idea or major new direction unless skipped)
+        // Step 1: Intake Scan & Optional Clarifying Interview
         if !skipInterview && !hadPriorVerdict {
             session.stage = .scanningIntake
             await onEvent(.sessionUpdated(session))
-            await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is reviewing your pitch with the panel…"))
+            await onEvent(.activeThinkersChanged(
+                [moderator.id],
+                statusLabel: session.hasFullCLITools
+                    ? "\(moderator.name) is checking repo context & reviewing your pitch…"
+                    : "\(moderator.name) is reviewing your pitch with the panel…"
+            ))
 
-            let intakePrompt = buildTranscriptContext(for: session, moderator: moderator, debaters: debaters)
+            let intakePrompt = buildTranscriptContext(for: session)
             let resp = try await runner.call(ModelCallRequest(
                 provider: moderator.provider,
                 modelID: moderator.modelID,
                 effort: moderator.effort,
-                systemPrompt: DebatePrompts.intakeSystemPrompt(moderator: moderator, debaters: debaters),
+                systemPrompt: DebatePrompts.intakeSystemPrompt(
+                    moderator: moderator,
+                    debaters: debaters,
+                    workspacePath: session.workspacePath,
+                    toolsEnabled: session.hasFullCLITools
+                ),
                 userPrompt: intakePrompt,
                 allowWebSearch: session.allowWebSearch,
+                toolPhase: researchPhase(for: session),
+                workspacePath: session.workspacePath,
                 openRouterAPIKey: openRouterKey
             ))
 
@@ -142,7 +155,6 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
-        // Step 2: Run the full automatic debate -> verdict pipeline
         return try await runDebateToVerdict(
             session: session,
             moderator: moderator,
@@ -154,7 +166,6 @@ public final class DebateOrchestrator: Sendable {
         )
     }
 
-    /// Resumes an `awaitingInterviewAnswers` session once the user submits or skips the interview card.
     public func submitInterviewAnswers(
         exchangeID: UUID,
         updatedQuestions: [InterviewQuestion],
@@ -190,7 +201,114 @@ public final class DebateOrchestrator: Sendable {
         )
     }
 
-    // MARK: - Core Multi-Round Debate Engine
+    /// Runs Chair-coordinated sequential write execution for a Co-Signed Verdict (either automatically or when the user clicks "Execute Plan").
+    public func executeVerdictPlan(
+        verdictID: UUID,
+        into initialSession: DebateSession,
+        moderator: Persona,
+        debaters: [Persona],
+        modelLabels: [String: String] = [:],
+        openRouterKey: String? = nil,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async throws -> DebateSession {
+        var session = initialSession
+        guard let vIdx = session.entries.firstIndex(where: {
+            if case .verdict(let v) = $0 { return v.id == verdictID }
+            return false
+        }), case .verdict(var verdict) = session.entries[vIdx] else {
+            return session
+        }
+
+        session.stage = .executingPlan
+        session.entries.append(.roundBanner(RoundBanner(
+            roundNumber: 99,
+            title: "Chair-Coordinated Execution",
+            subtitle: "\(moderator.name) is coordinating sequential edits — one persona holds the write lock at a time"
+        )))
+        await onEvent(.sessionUpdated(session))
+
+        // Build assignments from verdict (or synthesize 1 clean assignment from actionSteps if none were pre-populated)
+        var assignments = verdict.executionAssignments ?? []
+        if assignments.isEmpty {
+            let combinedSteps = verdict.actionSteps.isEmpty
+                ? verdict.recommendation
+                : verdict.actionSteps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+            let defaultExecutor = debaters.first ?? moderator
+            assignments = [
+                ExecutionAssignment(
+                    assignedPersonaName: defaultExecutor.name,
+                    taskInstruction: "Implement and verify the Co-Signed Verdict:\n\(combinedSteps)",
+                    targetScope: session.workspacePath ?? ""
+                )
+            ]
+        }
+
+        let allCouncil = [moderator] + debaters
+        for (idx, assignment) in assignments.enumerated() {
+            try Task.checkCancellation()
+            let executor = allCouncil.first {
+                $0.name.localizedCaseInsensitiveContains(assignment.assignedPersonaName)
+                || assignment.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
+            } ?? moderator
+
+            await onEvent(.activeThinkersChanged(
+                [executor.id],
+                statusLabel: "Step \(idx + 1)/\(assignments.count): \(executor.name) is executing edits (\(moderator.name) coordinating)…"
+            ))
+
+            let liveContext = buildTranscriptContext(for: session)
+            let resp = try await runner.call(ModelCallRequest(
+                provider: executor.provider,
+                modelID: executor.modelID,
+                effort: executor.effort,
+                systemPrompt: DebatePrompts.coordinatedExecutionSystemPrompt(
+                    executor: executor,
+                    moderatorName: moderator.name,
+                    assignment: assignment,
+                    workspacePath: session.workspacePath
+                ),
+                userPrompt: liveContext,
+                allowWebSearch: session.allowWebSearch,
+                toolPhase: .coordinatedReadWrite,
+                workspacePath: session.workspacePath,
+                openRouterAPIKey: openRouterKey
+            ))
+
+            let execTurn = parseDebateTurn(
+                raw: resp.rawText,
+                durationMs: resp.durationMs,
+                roundNumber: 99,
+                roundLabel: "Execution \(idx + 1)/\(assignments.count)",
+                persona: executor,
+                modelLabel: modelLabels[executor.modelID] ?? executor.modelID,
+                defaultStance: .executing
+            )
+            session.entries.append(.turn(execTurn))
+            session.updatedAt = Date()
+            await onEvent(.sessionUpdated(session))
+            await onEvent(.enqueueSpeech(SpeechQueueItem(
+                id: execTurn.id,
+                persona: executor,
+                spokenText: execTurn.spokenTake,
+                contextLabel: "Executed · \(executor.name)"
+            )))
+        }
+
+        verdict.wasExecuted = true
+        if let updatedIdx = session.entries.firstIndex(where: {
+            if case .verdict(let v) = $0 { return v.id == verdictID }
+            return false
+        }) {
+            session.entries[updatedIdx] = .verdict(verdict)
+        }
+        session.stage = .completed
+        session.updatedAt = Date()
+        await onEvent(.activeThinkersChanged([], statusLabel: "Coordinated edits complete"))
+        await onEvent(.sessionUpdated(session))
+        return session
+    }
+
+    // MARK: - Core Multi-Round Debate Engine (With Live Inter-Persona Dialogue)
 
     private func runDebateToVerdict(
         session initialSession: DebateSession,
@@ -205,7 +323,6 @@ public final class DebateOrchestrator: Sendable {
         session.stage = .debating
         await onEvent(.sessionUpdated(session))
 
-        // Auto-title fallback if still untitled
         if session.title == "New Council Session",
            let firstPrompt = session.entries.compactMap({ entry -> String? in
                if case .userPrompt(let m) = entry { return m.text }
@@ -214,22 +331,26 @@ public final class DebateOrchestrator: Sendable {
             session.title = Self.quickHeuristicTitle(from: firstPrompt)
         }
 
-        // --- ROUND 1: Parallel Blind Openings ---
-        let r1Title = isFollowUpRound ? "Follow-Up Positions" : "Round 1 · Blind Opening Takes"
-        let r1Sub = isFollowUpRound
-            ? "Independent takes on your follow-up"
-            : "Each panelist answers independently in parallel — zero anchoring"
+        // --- ROUND 1: Parallel Blind Research & Opening Stances ---
+        let r1Title = isFollowUpRound ? "Follow-Up Investigation & Positions" : "Round 1 · Blind Research & Opening Stances"
+        let r1Sub = session.hasFullCLITools
+            ? "Panelists inspect repos/context independently in parallel — zero anchoring"
+            : "Independent opening stances in parallel — zero anchoring"
         session.entries.append(.roundBanner(RoundBanner(roundNumber: 1, title: r1Title, subtitle: r1Sub)))
         await onEvent(.sessionUpdated(session))
 
-        let baseContext = buildTranscriptContext(for: session, moderator: moderator, debaters: debaters)
-        let thinkerIDs = Set(debaters.map(\.id))
-        await onEvent(.activeThinkersChanged(thinkerIDs, statusLabel: "Round 1: Panelists forming independent positions in parallel…"))
+        let baseContext = buildTranscriptContext(for: session)
+        await onEvent(.activeThinkersChanged(
+            Set(debaters.map(\.id)),
+            statusLabel: session.hasFullCLITools
+                ? "Round 1: Panelists inspecting context & forming independent stances…"
+                : "Round 1: Panelists forming independent positions…"
+        ))
 
         let blindTurns = try await runParallelBlindOpeningRound(
             debaters: debaters,
             transcriptContext: baseContext,
-            allowWebSearch: session.allowWebSearch,
+            session: session,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey
         )
@@ -249,7 +370,43 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
-        // --- ROUNDS 2..N: Cross-Examination & Rebuttals ---
+        // --- CHAIR FLOOR DIRECTION: Vera calls out the sharpest fault line between the personas! ---
+        if !isFollowUpRound && debaters.count >= 2 {
+            try Task.checkCancellation()
+            await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is framing the clash on the floor…"))
+            let r1Board = buildTranscriptContext(for: session)
+            let chairResp = try await runner.call(ModelCallRequest(
+                provider: moderator.provider,
+                modelID: moderator.modelID,
+                effort: .medium,
+                systemPrompt: DebatePrompts.chairFloorDirectionPrompt(moderator: moderator, debaters: debaters),
+                userPrompt: r1Board,
+                allowWebSearch: false,
+                toolPhase: .closedBook,
+                workspacePath: session.workspacePath,
+                openRouterAPIKey: openRouterKey
+            ))
+            let chairTurn = parseDebateTurn(
+                raw: chairResp.rawText,
+                durationMs: chairResp.durationMs,
+                roundNumber: 1,
+                roundLabel: "Chair",
+                persona: moderator,
+                modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
+                defaultStance: .moderating
+            )
+            session.entries.append(.turn(chairTurn))
+            session.updatedAt = Date()
+            await onEvent(.sessionUpdated(session))
+            await onEvent(.enqueueSpeech(SpeechQueueItem(
+                id: chairTurn.id,
+                persona: moderator,
+                spokenText: chairTurn.spokenTake,
+                contextLabel: "\(moderator.name) · Directing Floor"
+            )))
+        }
+
+        // --- ROUNDS 2..N: Live Inter-Persona Conversation & Direct Exchanges ---
         let rebuttalCount = isFollowUpRound ? min(1, session.maxRebuttalRounds) : max(1, session.maxRebuttalRounds)
         for rebuttalIdx in 1...rebuttalCount {
             try Task.checkCancellation()
@@ -257,22 +414,23 @@ public final class DebateOrchestrator: Sendable {
             let isFinal = (rebuttalIdx == rebuttalCount)
             let bannerTitle = isFinal && rebuttalCount > 1
                 ? "Round \(roundNum) · Final Cross-Examination & Co-Sign Check"
-                : "Round \(roundNum) · Cross-Examination & Rebuttals"
+                : "Round \(roundNum) · Live Council Cross-Examination"
             let bannerSub = isFinal
                 ? "Panelists settle final stances, concessions, or holdout dissents"
-                : "Challenging assumptions, poking holes, and sharpening the best ideas"
+                : "Panelists challenge each other directly and answer face-to-face"
 
             session.entries.append(.roundBanner(RoundBanner(roundNumber: roundNum, title: bannerTitle, subtitle: bannerSub)))
             await onEvent(.sessionUpdated(session))
 
             var roundTurns: [DebateTurn] = []
-            // Rotate speaking order each round so the same debater never speaks first every time
+            var directRepliesTriggered = 0
             let orderedDebaters = rotate(debaters, by: rebuttalIdx)
+
             for debater in orderedDebaters {
                 try Task.checkCancellation()
-                await onEvent(.activeThinkersChanged([debater.id], statusLabel: "Round \(roundNum): \(debater.name) is responding…"))
+                await onEvent(.activeThinkersChanged([debater.id], statusLabel: "Round \(roundNum): \(debater.name) has the floor…"))
 
-                let liveBoard = buildTranscriptContext(for: session, moderator: moderator, debaters: debaters)
+                let liveBoard = buildTranscriptContext(for: session)
                 let resp = try await runner.call(ModelCallRequest(
                     provider: debater.provider,
                     modelID: debater.modelID,
@@ -280,11 +438,16 @@ public final class DebateOrchestrator: Sendable {
                     systemPrompt: DebatePrompts.rebuttalSystemPrompt(
                         debater: debater,
                         allDebaters: debaters,
+                        moderatorName: moderator.name,
                         roundNumber: roundNum,
-                        isFinalRebuttal: isFinal
+                        isFinalRebuttal: isFinal,
+                        workspacePath: session.workspacePath,
+                        toolsEnabled: session.hasFullCLITools
                     ),
                     userPrompt: liveBoard,
                     allowWebSearch: session.allowWebSearch,
+                    toolPhase: researchPhase(for: session),
+                    workspacePath: session.workspacePath,
                     openRouterAPIKey: openRouterKey
                 ))
 
@@ -307,9 +470,63 @@ public final class DebateOrchestrator: Sendable {
                     spokenText: turn.spokenTake,
                     contextLabel: "Round \(roundNum) · \(debater.name)"
                 )))
+
+                // LIVE INTER-PERSONA BACK-AND-FORTH: If this debater put a direct question to a specific peer,
+                // hand the mic immediately to that peer for a brisk face-to-face answer (up to 1 direct exchange per round so pacing stays snappy)!
+                if !isFinal,
+                   directRepliesTriggered < 1,
+                   let peerQuestion = turn.directQuestionForPeer, !peerQuestion.isEmpty,
+                   let targetName = turn.targetPersonaName, !targetName.isEmpty,
+                   let challengedPeer = debaters.first(where: {
+                       $0.id != debater.id && ($0.name.localizedCaseInsensitiveContains(targetName) || targetName.localizedCaseInsensitiveContains($0.name))
+                   }) {
+                    directRepliesTriggered += 1
+                    try Task.checkCancellation()
+                    await onEvent(.activeThinkersChanged(
+                        [challengedPeer.id],
+                        statusLabel: "\(challengedPeer.name) is answering \(debater.name) directly…"
+                    ))
+
+                    let replyBoard = buildTranscriptContext(for: session)
+                    let replyResp = try await runner.call(ModelCallRequest(
+                        provider: challengedPeer.provider,
+                        modelID: challengedPeer.modelID,
+                        effort: challengedPeer.effort,
+                        systemPrompt: DebatePrompts.peerDirectReplyPrompt(
+                            responder: challengedPeer,
+                            challengerName: debater.name,
+                            question: peerQuestion,
+                            workspacePath: session.workspacePath,
+                            toolsEnabled: session.hasFullCLITools
+                        ),
+                        userPrompt: replyBoard,
+                        allowWebSearch: session.allowWebSearch,
+                        toolPhase: researchPhase(for: session),
+                        workspacePath: session.workspacePath,
+                        openRouterAPIKey: openRouterKey
+                    ))
+
+                    let replyTurn = parseDebateTurn(
+                        raw: replyResp.rawText,
+                        durationMs: replyResp.durationMs,
+                        roundNumber: roundNum,
+                        roundLabel: "Direct Exchange",
+                        persona: challengedPeer,
+                        modelLabel: modelLabels[challengedPeer.modelID] ?? challengedPeer.modelID,
+                        defaultStance: .replying
+                    )
+                    session.entries.append(.turn(replyTurn))
+                    session.updatedAt = Date()
+                    await onEvent(.sessionUpdated(session))
+                    await onEvent(.enqueueSpeech(SpeechQueueItem(
+                        id: replyTurn.id,
+                        persona: challengedPeer,
+                        spokenText: replyTurn.spokenTake,
+                        contextLabel: "\(challengedPeer.name) → \(debater.name)"
+                    )))
+                }
             }
 
-            // Early convergence stop: if every debater already co-signed or conceded, don't burn another round talking in circles
             let allConverged = !roundTurns.isEmpty && roundTurns.allSatisfy {
                 $0.stance == .cosigning || $0.stance == .conceding
             }
@@ -318,20 +535,26 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
-        // --- STEP 3: Moderator Co-Signed Verdict + Minority Dissent ---
+        // --- STEP 3: Moderator Co-Signed Verdict ---
         try Task.checkCancellation()
         session.stage = .synthesizingVerdict
         await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is drafting the Co-Signed Verdict…"))
         await onEvent(.sessionUpdated(session))
 
-        let fullTranscript = buildTranscriptContext(for: session, moderator: moderator, debaters: debaters)
+        let fullTranscript = buildTranscriptContext(for: session)
         let verdictResp = try await runner.call(ModelCallRequest(
             provider: moderator.provider,
             modelID: moderator.modelID,
             effort: moderator.effort,
-            systemPrompt: DebatePrompts.verdictSystemPrompt(moderator: moderator, debaters: debaters),
+            systemPrompt: DebatePrompts.verdictSystemPrompt(
+                moderator: moderator,
+                debaters: debaters,
+                toolsEnabled: session.hasFullCLITools
+            ),
             userPrompt: fullTranscript,
             allowWebSearch: session.allowWebSearch,
+            toolPhase: researchPhase(for: session),
+            workspacePath: session.workspacePath,
             openRouterAPIKey: openRouterKey
         ))
 
@@ -349,17 +572,38 @@ public final class DebateOrchestrator: Sendable {
             contextLabel: "Co-Signed Verdict · \(moderator.name)"
         )))
 
+        // --- STEP 4: Automatic Chair-Coordinated Execution if User Explicitly Asked for Edits ---
+        if session.hasFullCLITools,
+           verdict.shouldAutoExecute == true,
+           let assignments = verdict.executionAssignments,
+           !assignments.isEmpty {
+            return try await executeVerdictPlan(
+                verdictID: verdict.id,
+                into: session,
+                moderator: moderator,
+                debaters: debaters,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                onEvent: onEvent
+            )
+        }
+
         return session
     }
 
     private func runParallelBlindOpeningRound(
         debaters: [Persona],
         transcriptContext: String,
-        allowWebSearch: Bool,
+        session: DebateSession,
         modelLabels: [String: String],
         openRouterKey: String?
     ) async throws -> [DebateTurn] {
-        try await withThrowingTaskGroup(of: (Int, DebateTurn).self) { group in
+        let phase = researchPhase(for: session)
+        let ws = session.workspacePath
+        let toolsOn = session.hasFullCLITools
+        let webOn = session.allowWebSearch
+
+        return try await withThrowingTaskGroup(of: (Int, DebateTurn).self) { group in
             for (index, debater) in debaters.enumerated() {
                 let modelLabel = modelLabels[debater.modelID] ?? debater.modelID
                 group.addTask { [runner] in
@@ -367,9 +611,16 @@ public final class DebateOrchestrator: Sendable {
                         provider: debater.provider,
                         modelID: debater.modelID,
                         effort: debater.effort,
-                        systemPrompt: DebatePrompts.blindOpeningSystemPrompt(debater: debater, allDebaters: debaters),
+                        systemPrompt: DebatePrompts.blindOpeningSystemPrompt(
+                            debater: debater,
+                            allDebaters: debaters,
+                            workspacePath: ws,
+                            toolsEnabled: toolsOn
+                        ),
                         userPrompt: transcriptContext,
-                        allowWebSearch: allowWebSearch,
+                        allowWebSearch: webOn,
+                        toolPhase: phase,
+                        workspacePath: ws,
                         openRouterAPIKey: openRouterKey
                     ))
                     let turn = self.parseDebateTurn(
@@ -406,14 +657,24 @@ public final class DebateOrchestrator: Sendable {
         await onEvent(.activeThinkersChanged([target.id], statusLabel: "\(target.name) is replying directly…"))
         await onEvent(.sessionUpdated(session))
 
-        let context = buildTranscriptContext(for: session, moderator: moderator, debaters: debaters)
+        // Since only ONE persona is running here, they safely hold the single-agent write lock if CLI tools are enabled
+        let phase: ToolExecutionPhase = session.hasFullCLITools ? .coordinatedReadWrite : .closedBook
+        let context = buildTranscriptContext(for: session)
         let resp = try await runner.call(ModelCallRequest(
             provider: target.provider,
             modelID: target.modelID,
             effort: target.effort,
-            systemPrompt: DebatePrompts.followUpTurnSystemPrompt(persona: target, peers: [moderator] + debaters),
+            systemPrompt: DebatePrompts.followUpTurnSystemPrompt(
+                persona: target,
+                peers: [moderator] + debaters,
+                workspacePath: session.workspacePath,
+                toolsEnabled: session.hasFullCLITools,
+                allowWrites: session.hasFullCLITools
+            ),
             userPrompt: context,
             allowWebSearch: session.allowWebSearch,
+            toolPhase: phase,
+            workspacePath: session.workspacePath,
             openRouterAPIKey: openRouterKey
         ))
         let turn = parseDebateTurn(
@@ -458,6 +719,8 @@ public final class DebateOrchestrator: Sendable {
             let spoken = (json["spoken_take"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             let thought = (json["thought_process"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let points = (json["key_points"] as? [String])?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } ?? []
+            let directQ = (json["direct_question_for_peer"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let toolsUsed = (json["tools_used"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
 
             if let spoken, !spoken.isEmpty {
                 return DebateTurn(
@@ -475,12 +738,13 @@ public final class DebateOrchestrator: Sendable {
                     spokenTake: spoken,
                     thoughtProcess: thought,
                     keyPoints: points,
+                    directQuestionForPeer: (directQ?.isEmpty == false) ? directQ : nil,
+                    toolsActivitySummary: (toolsUsed?.isEmpty == false) ? toolsUsed : nil,
                     durationMs: durationMs
                 )
             }
         }
 
-        // Graceful prose fallback if a model ignored JSON formatting
         let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let sentences = cleaned.components(separatedBy: ". ")
         let compact = sentences.prefix(3).joined(separator: ". ")
@@ -511,6 +775,7 @@ public final class DebateOrchestrator: Sendable {
             let tradeoffs = (json["key_tradeoffs"] as? [String])?.filter { !$0.isEmpty } ?? []
             let rawCosigned = (json["cosigned_by"] as? [String]) ?? debaters.map(\.name)
             let thought = (json["thought_process"] as? String) ?? ""
+            let autoExec = (json["should_auto_execute"] as? Bool) ?? false
 
             var cosignedIDs: [UUID] = []
             var cosignedNames: [String] = []
@@ -541,6 +806,21 @@ public final class DebateOrchestrator: Sendable {
                 }
             }
 
+            var assignments: [ExecutionAssignment] = []
+            if let rawAssign = json["execution_assignments"] as? [[String: Any]] {
+                for item in rawAssign.prefix(4) {
+                    guard let who = (item["assigned_to"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          let instr = (item["task_instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !who.isEmpty, !instr.isEmpty else { continue }
+                    let scope = (item["target_scope"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    assignments.append(ExecutionAssignment(
+                        assignedPersonaName: who,
+                        taskInstruction: instr,
+                        targetScope: scope
+                    ))
+                }
+            }
+
             if cosignedNames.isEmpty && dissents.isEmpty {
                 cosignedIDs = debaters.map(\.id)
                 cosignedNames = debaters.map(\.name)
@@ -557,7 +837,10 @@ public final class DebateOrchestrator: Sendable {
                 cosignedPersonaIDs: cosignedIDs,
                 cosignedNames: cosignedNames,
                 dissents: dissents,
-                moderatorThoughtProcess: thought
+                moderatorThoughtProcess: thought,
+                shouldAutoExecute: autoExec,
+                executionAssignments: assignments.isEmpty ? nil : assignments,
+                wasExecuted: false
             )
         }
 
@@ -573,8 +856,11 @@ public final class DebateOrchestrator: Sendable {
         )
     }
 
-    private func buildTranscriptContext(for session: DebateSession, moderator: Persona, debaters: [Persona]) -> String {
+    private func buildTranscriptContext(for session: DebateSession) -> String {
         var sections: [String] = []
+        if let ws = session.workspacePath, !ws.isEmpty {
+            sections.append("ACTIVE WORKSPACE DIRECTORY: \(ws)")
+        }
         for entry in session.entries {
             switch entry {
             case .userPrompt(let msg):
@@ -599,12 +885,18 @@ public final class DebateOrchestrator: Sendable {
             case .turn(let t):
                 let targetSuffix = t.targetPersonaName.map { " -> @\($0)" } ?? ""
                 var block = "[\(t.roundLabel)] \(t.personaName) (\(t.personaTitle), stance=\(t.stance.rawValue)\(targetSuffix)):\nSpoken: \(t.spokenTake)"
+                if let dq = t.directQuestionForPeer, !dq.isEmpty {
+                    block += "\nDirect Question to \(t.targetPersonaName ?? "peer"): \(dq)"
+                }
                 if !t.keyPoints.isEmpty {
                     block += "\nKey Points: " + t.keyPoints.joined(separator: " | ")
                 }
+                if let tools = t.toolsActivitySummary, !tools.isEmpty {
+                    block += "\nTools/Files Checked: \(tools)"
+                }
                 sections.append(block)
             case .verdict(let v):
-                sections.append("PRIOR CO-SIGNED VERDICT (\(v.headline)):\n\(v.recommendation)")
+                sections.append("CO-SIGNED VERDICT (\(v.headline)):\n\(v.recommendation)")
             case .systemNote:
                 break
             }

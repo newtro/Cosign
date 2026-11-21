@@ -88,6 +88,7 @@ final class CosignCoreTests: XCTestCase {
 
         let runner = FakeModelRunner { req in
             if req.systemPrompt.contains("INTAKE TRIAGE") {
+                XCTAssertEqual(req.toolPhase, .researchAndInspect)
                 return ModelCallResponse(rawText: """
                 {
                   "session_title": "Local AI Council App",
@@ -105,35 +106,91 @@ final class CosignCoreTests: XCTestCase {
                 }
                 """, durationMs: 42)
             } else if req.systemPrompt.contains("ROUND 1") {
+                XCTAssertEqual(req.toolPhase, .researchAndInspect)
                 return ModelCallResponse(rawText: """
                 {
                   "stance": "opening",
                   "spoken_take": "Keep it 100% local on macOS and lean into subscription CLIs.",
                   "thought_process": "Deep opening analysis.",
-                  "key_points": ["Zero API burn", "Fast iteration"]
+                  "key_points": ["Zero API burn", "Fast iteration"],
+                  "tools_used": "Inspected iSmith/Makefile"
                 }
                 """, durationMs: 55)
-            } else if req.systemPrompt.contains("CROSS-EXAMINATION") {
+            } else if req.systemPrompt.contains("DIRECT THE FLOOR") {
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "moderating",
+                  "spoken_take": "Sable and Marcus, hash out how CLI permissions work without colliding.",
+                  "thought_process": "Focusing the room.",
+                  "key_points": ["Write safety"]
+                }
+                """, durationMs: 30)
+            } else if req.systemPrompt.contains("DIRECT EXCHANGE ON THE FLOOR") {
+                XCTAssertEqual(req.toolPhase, .researchAndInspect)
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "replying",
+                  "target_persona": "Sable",
+                  "spoken_take": "Good catch Sable—Vera holds the write lock until we converge.",
+                  "thought_process": "Sequential write lock.",
+                  "key_points": ["Single writer"]
+                }
+                """, durationMs: 40)
+            } else if req.systemPrompt.contains("LIVE INTER-PERSONA DEBATE") {
+                XCTAssertEqual(req.toolPhase, .researchAndInspect)
+                if req.systemPrompt.contains("Sable") {
+                    return ModelCallResponse(rawText: """
+                    {
+                      "stance": "challenging",
+                      "target_persona": "Marcus",
+                      "spoken_take": "[chuckle] Marcus, what stops three parallel CLIs from editing the same file?",
+                      "direct_question_for_peer": "How do you prevent parallel write collisions?",
+                      "thought_process": "Testing write lock.",
+                      "key_points": ["Parallel write hazard"]
+                    }
+                    """, durationMs: 60)
+                }
                 return ModelCallResponse(rawText: """
                 {
                   "stance": "cosigning",
                   "target_persona": "Marcus",
-                  "spoken_take": "[chuckle] Fair point—as long as CLI processes run in isolated temp homes, I'm in.",
-                  "thought_process": "Verified token isolation.",
-                  "key_points": ["Sandbox HOME", "Co-sign"]
+                  "spoken_take": "Sequential Chair-coordinated writes solve that cleanly.",
+                  "thought_process": "Verified.",
+                  "key_points": ["Co-sign"]
                 }
                 """, durationMs: 60)
+            } else if req.systemPrompt.contains("ASSIGNED TASK:") {
+                // Coordinated execution MUST unlock full read-write access!
+                XCTAssertEqual(req.toolPhase, .coordinatedReadWrite)
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "executing",
+                  "target_persona": "Vera",
+                  "spoken_take": "Updated README.md and verified all package tests pass.",
+                  "thought_process": "Edited README.md cleanly.",
+                  "key_points": ["Updated README.md"],
+                  "tools_used": "Edited README.md, ran swift test"
+                }
+                """, durationMs: 85)
             } else {
                 return ModelCallResponse(rawText: """
                 {
-                  "headline": "Build a Native macOS App Over Isolated Subscription CLIs",
-                  "spoken_verdict": "The council is unanimous: ship a native SwiftUI Mac app backed by isolated subscription CLIs.",
+                  "headline": "Build a Native macOS App Over Subscription CLIs",
+                  "spoken_verdict": "The council agrees: full CLI research during debate, and Chair-coordinated sequential writes.",
                   "recommendation": "Use SwiftUI + Sparkle + local Chatterbox Turbo.",
-                  "action_steps": ["Scaffold XcodeGen", "Isolate CLI homes"],
+                  "action_steps": ["Scaffold XcodeGen", "Coordinate CLI writes"],
                   "key_tradeoffs": ["Mac-only vs zero marginal API cost"],
                   "cosigned_by": ["Marcus", "Sable", "Orion"],
                   "dissents": [],
-                  "thought_process": "All three converged in Round 2."
+                  "should_auto_execute": true,
+                  "execution_assignments": [
+                    {
+                      "assigned_to": "Marcus",
+                      "task_instruction": "Update README.md with CLI tool modes",
+                      "target_scope": "README.md"
+                    }
+                  ],
+                  "thought_process": "All three converged."
                 }
                 """, durationMs: 70)
             }
@@ -189,15 +246,17 @@ final class CosignCoreTests: XCTestCase {
             if case .turn(let t) = entry { return t }
             return nil
         }
-        // 3 blind openings + 3 round-2 rebuttals (early stop because all cosigned!) = 6 turns
-        XCTAssertEqual(turns.count, 6)
-        guard case .verdict(let verdict) = completed.entries.last else {
-            XCTFail("Expected final verdict")
-            return
+        // Verify Chair floor direction, direct peer reply, and Chair-coordinated execution all occurred!
+        XCTAssertTrue(turns.contains(where: { $0.stance == .moderating }))
+        XCTAssertTrue(turns.contains(where: { $0.stance == .replying }))
+        XCTAssertTrue(turns.contains(where: { $0.stance == .executing }))
+
+        let verdicts = completed.entries.compactMap { entry -> CosignVerdict? in
+            if case .verdict(let v) = entry { return v }
+            return nil
         }
-        XCTAssertEqual(verdict.cosignedNames.count, 3)
-        // 1 interview + 6 turns + 1 verdict = 8 spoken items
-        XCTAssertEqual(speechBox.withLock { $0.count }, 8)
+        XCTAssertEqual(verdicts.first?.wasExecuted, true)
+        XCTAssertGreaterThanOrEqual(speechBox.withLock { $0.count }, 10)
     }
 
     func testSessionStoreRoundTrip() throws {

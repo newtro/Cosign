@@ -43,8 +43,49 @@ struct CouncilStageHeader: View {
 
                 Spacer(minLength: 12)
 
-                // Lineup Switcher & Studio Controls
+                // Workspace Selector, Lineup Switcher & Studio Controls
                 HStack(spacing: 8) {
+                    let wsPath = session.workspacePath ?? WorkspaceResolver.defaultWorkspacePath()
+                    let wsName = URL(fileURLWithPath: wsPath).lastPathComponent
+                    Menu {
+                        Button("Choose Folder or Repo…") {
+                            model.chooseWorkspaceFolderWithPanel()
+                        }
+                        Divider()
+                        ForEach(model.quickSwitchRepoPaths, id: \.self) { candidate in
+                            Button {
+                                model.setCurrentSessionWorkspace(candidate)
+                            } label: {
+                                HStack {
+                                    Text(candidate)
+                                    if candidate == wsPath {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "folder.fill")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(StudioTheme.emerald)
+                            Text(wsName.isEmpty ? "Workspace" : wsName)
+                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(StudioTheme.inkSecondary)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(StudioTheme.inkMuted)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.white.opacity(0.045)))
+                        .overlay(Capsule().strokeBorder(StudioTheme.emerald.opacity(0.28), lineWidth: 1))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Active workspace folder for CLI repo/file tools: \(wsPath)")
+
                     Button {
                         model.showingLineupPopover.toggle()
                     } label: {
@@ -144,6 +185,7 @@ struct CouncilStageHeader: View {
             case .awaitingInterviewAnswers: return ("Awaiting Your Input", StudioTheme.brassBright)
             case .debating: return ("Live Debate", StudioTheme.sky)
             case .synthesizingVerdict: return ("Drafting Verdict", StudioTheme.brassBright)
+            case .executingPlan: return ("Coordinating Edits", StudioTheme.emerald)
             case .completed: return ("Co-Signed", StudioTheme.emerald)
             case .cancelled: return ("Paused", StudioTheme.inkMuted)
             case .error: return ("Attention Needed", StudioTheme.crimson)

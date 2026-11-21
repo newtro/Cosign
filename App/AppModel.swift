@@ -72,7 +72,18 @@ final class AppModel: ObservableObject {
             self.selectedSessionID = initial.id
             store.saveSession(initial)
         } else {
-            self.selectedSessionID = loadedSessions.first?.id
+            let defaultWS = loadedPrefs.defaultWorkspacePath ?? WorkspaceResolver.defaultWorkspacePath()
+            self.sessions = loadedSessions.map { s in
+                var copy = s
+                if copy.workspacePath == nil {
+                    copy.workspacePath = defaultWS
+                }
+                if copy.cliToolsEnabled == nil {
+                    copy.cliToolsEnabled = true
+                }
+                return copy
+            }
+            self.selectedSessionID = self.sessions.first?.id
         }
 
         if !testing {
@@ -212,6 +223,68 @@ final class AppModel: ObservableObject {
         updateSessionInPlace(session)
     }
 
+    func setCurrentSessionCLITools(_ enabled: Bool) {
+        preferences.defaultCLIToolsEnabled = enabled
+        store.savePreferences(preferences)
+        guard var session = currentSession else { return }
+        session.cliToolsEnabled = enabled
+        updateSessionInPlace(session)
+    }
+
+    func setCurrentSessionWorkspace(_ path: String) {
+        preferences.defaultWorkspacePath = path
+        var recents = preferences.recentWorkspacePaths ?? []
+        recents.removeAll { $0 == path }
+        recents.insert(path, at: 0)
+        preferences.recentWorkspacePaths = Array(recents.prefix(8))
+        store.savePreferences(preferences)
+
+        guard var session = currentSession else { return }
+        session.workspacePath = path
+        updateSessionInPlace(session)
+    }
+
+    func chooseWorkspaceFolderWithPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Workspace or Repository Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        if let current = currentSession?.workspacePath {
+            panel.directoryURL = URL(fileURLWithPath: current)
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            setCurrentSessionWorkspace(url.path)
+        }
+    }
+
+    var quickSwitchRepoPaths: [String] {
+        var result: [String] = []
+        let root = WorkspaceResolver.defaultWorkspacePath()
+        result.append(root)
+        for recent in (preferences.recentWorkspacePaths ?? []) where !result.contains(recent) {
+            result.append(recent)
+        }
+        if let items = try? FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: root),
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            let dirs = items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                .sorted { a, b in
+                    let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    return da > db
+                }
+                .prefix(10)
+                .map(\.path)
+            for d in dirs where !result.contains(d) {
+                result.append(d)
+            }
+        }
+        return result
+    }
+
     func setCurrentSessionRounds(_ rounds: Int) {
         preferences.defaultMaxRebuttalRounds = rounds
         store.savePreferences(preferences)
@@ -283,6 +356,46 @@ final class AppModel: ObservableObject {
                     exchangeID: exchangeID,
                     updatedQuestions: questions,
                     skipped: skipped,
+                    into: session,
+                    moderator: moderator,
+                    debaters: debaters,
+                    modelLabels: labels,
+                    openRouterKey: orKey
+                ) { [weak self] event in
+                    await self?.handleOrchestratorEvent(event)
+                }
+                self.updateSessionInPlace(finalSession)
+                self.activeThinkerIDs = []
+            } catch is CancellationError {
+                self.markSessionStopped(session.id)
+            } catch let err as ModelRunnerError {
+                if case .cancelled = err {
+                    self.markSessionStopped(session.id)
+                } else {
+                    self.recordError(err.localizedDescription, on: session.id)
+                }
+            } catch {
+                self.recordError(error.localizedDescription, on: session.id)
+            }
+        }
+    }
+
+    func executeVerdict(_ verdict: CosignVerdict) {
+        guard let session = currentSession, !session.stage.isBusy else { return }
+        lastErrorBanner = nil
+        voiceEngine.stopAll()
+
+        let moderator = activeModerator(for: session)
+        let debaters = activeDebaters(for: session)
+        let labels = allModelLabelsByID
+        let orKey = KeychainHelper.read(account: "openrouter")
+
+        activeRunTask?.cancel()
+        activeRunTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let finalSession = try await self.orchestrator.executeVerdictPlan(
+                    verdictID: verdict.id,
                     into: session,
                     moderator: moderator,
                     debaters: debaters,
@@ -478,7 +591,9 @@ final class AppModel: ObservableObject {
             moderatorID: modID,
             debaterIDs: debIDs,
             maxRebuttalRounds: prefs.defaultMaxRebuttalRounds,
-            allowWebSearch: prefs.defaultAllowWebSearch
+            allowWebSearch: prefs.defaultAllowWebSearch,
+            cliToolsEnabled: prefs.defaultCLIToolsEnabled ?? true,
+            workspacePath: prefs.defaultWorkspacePath ?? WorkspaceResolver.defaultWorkspacePath()
         )
     }
 }
