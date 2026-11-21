@@ -8,7 +8,7 @@ public enum JSONExtractor {
         "headline", "spoken_verdict", "recommendation", "action_steps",
         "key_tradeoffs", "cosigned_by", "dissents", "should_auto_execute",
         "execution_assignments", "verification_passed", "issues_found",
-        "files_summary", "how_to_run"
+        "files_summary", "how_to_run", "consensus_reached"
     ]
 
     /// Extracts the outermost JSON object `{ ... }` from an LLM response even if wrapped in markdown fences,
@@ -460,19 +460,60 @@ public enum DebatePrompts {
         """
     }
 
+    public static func chairConsensusMediationPrompt(
+        moderator: Persona,
+        debaters: [Persona],
+        roundNumber: Int
+    ) -> String {
+        let names = debaters.map(\.name).joined(separator: ", ")
+        return """
+        You are \(moderator.name), \(moderator.title), chairing an open-ended **"Run Until Consensus"** council debate between \(names) (just finished Round \(roundNumber)).
+        Personality: \(moderator.personality)
+        Style: \(moderator.debateStyle)
+
+        YOUR TASK — CONSENSUS CHECK & ACTIVE MEDIATION:
+        1. Check whether the council has genuinely reached actionable consensus on the core recommendation:
+           - Set `consensus_reached` to `true` if all panelists have converged on the same direction/plan (or if the majority has converged and a lone holdout has stated a final, irreducible caveat that more rounds won't change).
+           - Set `consensus_reached` to `false` if there is still an active, resolvable factual, technical, or strategic disagreement on the floor.
+        2. If `consensus_reached` is `false`, use `spoken_take` (1-3 sharp spoken sentences) to bridge what is ALREADY settled and focus the panelists strictly on resolving the single remaining sticking point in Round \(roundNumber + 1).
+        3. If `consensus_reached` is `true`, use `spoken_take` (1-2 crisp spoken sentences) to call the question and announce that the room has reached alignment.
+
+        \(expressiveVoiceGuidance)
+
+        Return ONLY valid JSON:
+        {
+          "consensus_reached": false,
+          "stance": "moderating",
+          "spoken_take": "1-3 lively spoken sentences mediating or calling consensus.",
+          "supporting_notes": "What is settled vs. what remains unresolved.",
+          "key_points": ["Remaining sticking point or consensus call"]
+        }
+        """
+    }
+
     public static func rebuttalSystemPrompt(
         debater: Persona,
         allDebaters: [Persona],
         moderatorName: String,
         roundNumber: Int,
         isFinalRebuttal: Bool,
+        untilConsensusMode: Bool = false,
         workspacePath: String?,
         toolsEnabled: Bool
     ) -> String {
         let peers = allDebaters.filter { $0.id != debater.id }.map { "\($0.name) (\($0.title))" }.joined(separator: ", ")
-        let convergenceNote = isFinalRebuttal
-            ? "This is the final debate round before \(moderatorName) drafts the verdict. State clearly what you CO-SIGN (`\"cosigning\"` or `\"conceding\"`) OR where you hold firm in dissent (`\"dissenting\"` or `\"challenging\"`)."
-            : "Talk DIRECTLY to your fellow panelists by first name! Challenge a peer's assumption with real evidence from the repo/docs, answer any point directed at you, or ask a pointed `direct_question_for_peer` to put a specific panelist on the spot."
+        let convergenceNote: String
+        if isFinalRebuttal {
+            convergenceNote = "This is the final debate round before \(moderatorName) drafts the verdict. State clearly what you CO-SIGN (`\"cosigning\"` or `\"conceding\"`) OR where you hold firm in dissent (`\"dissenting\"` or `\"challenging\"`)."
+        } else if untilConsensusMode && roundNumber >= 3 {
+            convergenceNote = """
+            This session is running **Until Consensus** (Round \(roundNumber)). Do NOT repeat points already settled!
+            - If a fellow panelist's evidence or synthesis genuinely satisfies your core concern, set `stance` to `"cosigning"` or `"conceding"` and state clearly what you co-sign.
+            - If a real flaw or unresolved risk still blocks your co-sign, set `stance` to `"challenging"` or `"dissenting"` and state the EXACT concrete change or proof needed to earn your agreement.
+            """
+        } else {
+            convergenceNote = "Talk DIRECTLY to your fellow panelists by first name! Challenge a peer's assumption with real evidence from the repo/docs, answer any point directed at you, or ask a pointed `direct_question_for_peer` to put a specific panelist on the spot. If you already fully agree with a peer's synthesis after weighing the trade-offs, you may set `stance` to `\"cosigning\"` or `\"conceding\"`."
+        }
         return """
         You are \(debater.name), \(debater.title), conversing live around the table with \(peers), moderated by \(moderatorName).
         Personality: \(debater.personality)

@@ -850,6 +850,34 @@ public enum SessionStage: String, Codable, Sendable {
     }
 }
 
+public enum RebuttalPolicy {
+    /// Sentinel value stored in `maxRebuttalRounds` meaning "keep debating until the council reaches consensus".
+    public static let untilConsensusValue: Int = 0
+    /// Upper ceiling on rebuttal rounds in "Until Consensus" mode so an irreconcilable philosophical deadlock never loops forever.
+    public static let safetyMaxRounds: Int = 10
+    /// Ordered options shown in the Composer & Settings pickers.
+    public static let presetOptions: [Int] = [1, 2, 3, 5, 8, untilConsensusValue]
+
+    public static func shortLabel(for rounds: Int) -> String {
+        if rounds <= 0 {
+            return "Until Consensus"
+        }
+        return "\(rounds) \(rounds == 1 ? "Rebuttal" : "Rebuttals")"
+    }
+
+    public static func menuLabel(for rounds: Int) -> String {
+        switch rounds {
+        case ..<1: return "Run Until Consensus (Chair-Mediated)"
+        case 1: return "1 Rebuttal Round (Fast)"
+        case 2: return "2 Rebuttal Rounds (Balanced)"
+        case 3: return "3 Rebuttal Rounds (Deep)"
+        case 5: return "5 Rebuttal Rounds (Extended)"
+        case 8: return "8 Rebuttal Rounds (Marathon)"
+        default: return "\(rounds) Rebuttal Rounds"
+        }
+    }
+}
+
 public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var title: String
@@ -857,6 +885,7 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
     public var updatedAt: Date
     public var moderatorID: UUID
     public var debaterIDs: [UUID]
+    /// Number of cross-examination rebuttal rounds (`1..N`), or `0` (`RebuttalPolicy.untilConsensusValue`) to run until consensus.
     public var maxRebuttalRounds: Int
     public var allowWebSearch: Bool
     /// Session workflow mode (`debate` vs `build`). Nil on legacy v1.0.x sessions defaults to `.debate`.
@@ -872,6 +901,10 @@ public struct DebateSession: Identifiable, Codable, Hashable, Sendable {
 
     public var activeMode: CouncilMode {
         mode ?? .debate
+    }
+
+    public var runsUntilConsensus: Bool {
+        maxRebuttalRounds <= 0
     }
 
     public var hasFullCLITools: Bool {

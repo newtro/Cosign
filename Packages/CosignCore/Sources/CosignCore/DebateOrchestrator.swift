@@ -909,18 +909,39 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
-        // --- ROUNDS 2..N: Live Inter-Persona Conversation & Direct Exchanges ---
-        let rebuttalCount = isFollowUpRound ? min(1, session.maxRebuttalRounds) : max(1, session.maxRebuttalRounds)
+        // --- ROUNDS 2..N: Live Inter-Persona Conversation & Direct Exchanges (Fixed Count OR Until Consensus) ---
+        let untilConsensus = !isFollowUpRound && session.runsUntilConsensus
+        let rebuttalCount: Int = {
+            if isFollowUpRound { return 1 }
+            if untilConsensus { return RebuttalPolicy.safetyMaxRounds }
+            return max(1, session.maxRebuttalRounds)
+        }()
+
         for rebuttalIdx in 1...rebuttalCount {
             try Task.checkCancellation()
             let roundNum = rebuttalIdx + 1
             let isFinal = (rebuttalIdx == rebuttalCount)
-            let bannerTitle = isFinal && rebuttalCount > 1
-                ? "Round \(roundNum) · Final Cross-Examination & Co-Sign Check"
-                : "Round \(roundNum) · Live Council Cross-Examination"
-            let bannerSub = isFinal
-                ? "Panelists settle final stances, concessions, or holdout dissents"
-                : "Panelists challenge each other directly and answer face-to-face"
+            let bannerTitle: String = {
+                if untilConsensus {
+                    if isFinal {
+                        return "Round \(roundNum) · Final Consensus & Co-Sign Call"
+                    }
+                    return rebuttalIdx == 1
+                        ? "Round \(roundNum) · Cross-Examination (Running Until Consensus)"
+                        : "Round \(roundNum) · Convergence & Sticking-Point Resolution"
+                }
+                return (isFinal && rebuttalCount > 1)
+                    ? "Round \(roundNum) · Final Cross-Examination & Co-Sign Check"
+                    : "Round \(roundNum) · Live Council Cross-Examination"
+            }()
+            let bannerSub: String = {
+                if untilConsensus && !isFinal {
+                    return "Debating until panelists align or \(moderator.name) calls consensus"
+                }
+                return isFinal
+                    ? "Panelists settle final stances, concessions, or holdout dissents"
+                    : "Panelists challenge each other directly and answer face-to-face"
+            }()
 
             session.entries.append(.roundBanner(RoundBanner(roundNumber: roundNum, title: bannerTitle, subtitle: bannerSub)))
             await onEvent(.sessionUpdated(session))
@@ -931,7 +952,8 @@ public final class DebateOrchestrator: Sendable {
 
             for debater in orderedDebaters {
                 try Task.checkCancellation()
-                await onEvent(.activeThinkersChanged([debater.id], statusLabel: "Round \(roundNum): \(debater.name) has the floor…"))
+                let modeHint = untilConsensus ? " (Until Consensus)" : ""
+                await onEvent(.activeThinkersChanged([debater.id], statusLabel: "Round \(roundNum)\(modeHint): \(debater.name) has the floor…"))
 
                 let liveBoard = buildTranscriptContext(for: session)
                 let resp: ModelCallResponse
@@ -946,6 +968,7 @@ public final class DebateOrchestrator: Sendable {
                             moderatorName: moderator.name,
                             roundNumber: roundNum,
                             isFinalRebuttal: isFinal,
+                            untilConsensusMode: untilConsensus,
                             workspacePath: session.workspacePath,
                             toolsEnabled: session.hasFullCLITools
                         ),
@@ -1044,6 +1067,55 @@ public final class DebateOrchestrator: Sendable {
             }
             if allConverged && !isFinal {
                 break
+            }
+
+            // In "Until Consensus" mode (from Round 3 onward), let the Chair actively mediate and check whether consensus is reached!
+            if untilConsensus && !isFinal && rebuttalIdx >= 2 && debaters.count >= 2 {
+                try Task.checkCancellation()
+                await onEvent(.activeThinkersChanged(
+                    [moderator.id],
+                    statusLabel: "\(moderator.name) is checking consensus & mediating Round \(roundNum)…"
+                ))
+                let board = buildTranscriptContext(for: session)
+                if let medResp = try? await runner.call(ModelCallRequest(
+                    provider: moderator.provider,
+                    modelID: moderator.modelID,
+                    effort: .medium,
+                    systemPrompt: DebatePrompts.chairConsensusMediationPrompt(
+                        moderator: moderator,
+                        debaters: debaters,
+                        roundNumber: roundNum
+                    ),
+                    userPrompt: board,
+                    allowWebSearch: false,
+                    toolPhase: .closedBook,
+                    workspacePath: session.workspacePath,
+                    openRouterAPIKey: openRouterKey
+                )) {
+                    let medJSON = JSONExtractor.parseObject(medResp.rawText)
+                    let consensusReached = (medJSON?["consensus_reached"] as? Bool) ?? false
+                    let medTurn = parseDebateTurn(
+                        raw: medResp.rawText,
+                        durationMs: medResp.durationMs,
+                        roundNumber: roundNum,
+                        roundLabel: consensusReached ? "Chair · Consensus Reached" : "Chair · Mediating",
+                        persona: moderator,
+                        modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
+                        defaultStance: .moderating
+                    )
+                    session.entries.append(.turn(medTurn))
+                    session.updatedAt = Date()
+                    await onEvent(.sessionUpdated(session))
+                    await onEvent(.enqueueSpeech(SpeechQueueItem(
+                        id: medTurn.id,
+                        persona: moderator,
+                        spokenText: medTurn.spokenTake,
+                        contextLabel: consensusReached ? "\(moderator.name) · Consensus" : "\(moderator.name) · Mediating"
+                    )))
+                    if consensusReached {
+                        break
+                    }
+                }
             }
         }
 

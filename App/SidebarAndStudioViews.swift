@@ -851,13 +851,13 @@ struct CosignSettingsView: View {
                 }
             }
 
-            Picker("Default Rebuttal Rounds", selection: Binding(
+            Picker("Default Rebuttal Depth", selection: Binding(
                 get: { model.preferences.defaultMaxRebuttalRounds },
                 set: { model.setCurrentSessionRounds($0) }
             )) {
-                Text("1 Rebuttal Round (Fast)").tag(1)
-                Text("2 Rebuttal Rounds (Balanced)").tag(2)
-                Text("3 Rebuttal Rounds (Deep)").tag(3)
+                ForEach(RebuttalPolicy.presetOptions, id: \.self) { opt in
+                    Text(RebuttalPolicy.menuLabel(for: opt)).tag(opt)
+                }
             }
 
             Toggle("Allow Web Search by default", isOn: Binding(

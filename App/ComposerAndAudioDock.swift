@@ -445,35 +445,50 @@ struct StudioComposerDock: View {
                 .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: session.allowWebSearch))
 
                 if session.activeMode == .debate {
-                    // Rebuttal Depth Menu
+                    // Rebuttal Depth Menu (1, 2, 3, 5, 8, or Run Until Consensus)
+                    let consensusMode = session.runsUntilConsensus
                     Menu {
-                        ForEach([1, 2, 3], id: \.self) { count in
+                        ForEach([1, 2, 3, 5, 8], id: \.self) { count in
                             Button {
                                 model.setCurrentSessionRounds(count)
                             } label: {
                                 HStack {
-                                    Text(count == 1 ? "1 Rebuttal Round (Fast)" : (count == 2 ? "2 Rebuttal Rounds (Balanced)" : "3 Rebuttal Rounds (Deep)"))
+                                    Text(RebuttalPolicy.menuLabel(for: count))
                                     if session.maxRebuttalRounds == count {
                                         Image(systemName: "checkmark")
                                     }
                                 }
                             }
                         }
+
+                        Divider()
+
+                        Button {
+                            model.setCurrentSessionRounds(RebuttalPolicy.untilConsensusValue)
+                        } label: {
+                            HStack {
+                                Text(RebuttalPolicy.menuLabel(for: RebuttalPolicy.untilConsensusValue))
+                                if consensusMode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
                     } label: {
                         HStack(spacing: 5) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 10.5))
-                            Text("\(session.maxRebuttalRounds) \(session.maxRebuttalRounds == 1 ? "Rebuttal" : "Rebuttals")")
+                            Image(systemName: consensusMode ? "infinity" : "arrow.triangle.2.circlepath")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text(RebuttalPolicy.shortLabel(for: session.maxRebuttalRounds))
                         }
                         .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(StudioTheme.inkSecondary)
+                        .foregroundStyle(consensusMode ? StudioTheme.brassBright : StudioTheme.inkSecondary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(Capsule().fill(Color.white.opacity(0.045)))
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+                        .background(Capsule().fill(consensusMode ? StudioTheme.brass.opacity(0.15) : Color.white.opacity(0.045)))
+                        .overlay(Capsule().strokeBorder(consensusMode ? StudioTheme.brass.opacity(0.42) : Color.white.opacity(0.08), lineWidth: 1))
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
+                    .help("Choose a fixed number of rebuttal rounds or keep debating until the council reaches consensus")
                 }
 
                 Spacer()

@@ -635,4 +635,74 @@ final class CosignCoreTests: XCTestCase {
         XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.rookID && $0.name == "Rook" }))
         XCTAssertTrue(mergedPresets.contains(where: { $0.id == DefaultRoster.taskBuildCrewPresetID && $0.name == "Task & Build Crew" }))
     }
+
+    func testRunUntilConsensusChairMediatedConvergence() async throws {
+        let personas = DefaultRoster.personas
+        let moderator = personas.first { $0.role == .moderator }!
+        let debaters = Array(personas.filter { $0.role == .debater }.prefix(3))
+        let medCalls = LockedBox<Int>(0)
+
+        let runner = FakeModelRunner { req in
+            if req.systemPrompt.contains("INTAKE TRIAGE") {
+                return ModelCallResponse(rawText: """
+                {"session_title": "Consensus Test", "needs_interview": false, "questions": []}
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("ROUND 1") {
+                return ModelCallResponse(rawText: """
+                {"stance": "opening", "spoken_take": "Initial view.", "supporting_notes": "Notes"}
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("DIRECT THE FLOOR") {
+                return ModelCallResponse(rawText: """
+                {"stance": "moderating", "spoken_take": "Hash it out.", "supporting_notes": "Floor"}
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("CONSENSUS CHECK & ACTIVE MEDIATION") {
+                let callIndex = medCalls.withLock { count -> Int in
+                    count += 1
+                    return count
+                }
+                let reached = (callIndex >= 2)
+                return ModelCallResponse(rawText: """
+                {
+                  "consensus_reached": \(reached),
+                  "stance": "moderating",
+                  "spoken_take": "\(reached ? "We have consensus across the table." : "Still one sticking point—resolve the latency cap.")",
+                  "supporting_notes": "Mediation check \(callIndex)"
+                }
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("LIVE INTER-PERSONA DEBATE") {
+                return ModelCallResponse(rawText: """
+                {"stance": "challenging", "spoken_take": "Pushing further.", "supporting_notes": "Debate"}
+                """, durationMs: 10)
+            } else {
+                return ModelCallResponse(rawText: """
+                {"headline": "Consensus Reached Verdict", "spoken_verdict": "Agreed.", "recommendation": "Ship."}
+                """, durationMs: 10)
+            }
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        let session = DebateSession(
+            moderatorID: moderator.id,
+            debaterIDs: debaters.map(\.id),
+            maxRebuttalRounds: RebuttalPolicy.untilConsensusValue
+        )
+        XCTAssertTrue(session.runsUntilConsensus)
+        XCTAssertEqual(RebuttalPolicy.shortLabel(for: session.maxRebuttalRounds), "Until Consensus")
+
+        let finished = try await orchestrator.submitUserMessage(
+            text: "Debate until you agree.",
+            into: session,
+            moderator: moderator,
+            debaters: debaters
+        ) { _ in }
+
+        XCTAssertEqual(finished.stage, .completed)
+        XCTAssertEqual(medCalls.withLock { $0 }, 2)
+        // Verify it ran past Round 3 into Round 4 before Chair called consensus!
+        let round4BannerExists = finished.entries.contains {
+            if case .roundBanner(let b) = $0 { return b.roundNumber == 4 }
+            return false
+        }
+        XCTAssertTrue(round4BannerExists)
+    }
 }
