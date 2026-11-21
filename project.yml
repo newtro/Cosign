@@ -1,0 +1,79 @@
+name: Cosign
+options:
+  bundleIdPrefix: com.scottsmith
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  CosignCore:
+    path: Packages/CosignCore
+  CosignVoice:
+    path: Packages/CosignVoice
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    DEVELOPMENT_TEAM: 232A77467G
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Cosign:
+    type: application
+    platform: macOS
+    sources: [App]
+    dependencies:
+      - package: CosignCore
+      - package: CosignVoice
+      - package: Sparkle
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: $(COSIGN_DISPLAY_NAME)
+        CFBundleName: $(COSIGN_DISPLAY_NAME)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.productivity
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        SUFeedURL: https://raw.githubusercontent.com/newtro/Cosign/main/appcast.xml
+        SUEnableAutomaticChecks: true
+        SUAutomaticallyUpdate: true
+        SUScheduledCheckInterval: 86400
+        SUVerifyUpdateBeforeExtraction: true
+        SUPublicEDKey: Ezl8lB6Z6JnAQ08oLRWy8uOWsNpPxzlNEV4d5+xFyEU=
+    entitlements:
+      path: App/Cosign.entitlements
+      properties:
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_NAME: Cosign
+        ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.cosign.debug
+          COSIGN_DISPLAY_NAME: Cosign Dev
+          ASSETCATALOG_COMPILER_APPICON_NAME: AppIconDev
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.cosign
+          COSIGN_DISPLAY_NAME: Cosign
+          ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    scheme:
+      testTargets: [CosignTests]
+  CosignTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [AppTests]
+    dependencies:
+      - target: Cosign
+      - package: CosignCore
+      - package: CosignVoice
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.scottsmith.cosign.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Cosign.app/Contents/MacOS/Cosign
+        BUNDLE_LOADER: $(TEST_HOST)

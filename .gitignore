@@ -1,0 +1,26 @@
+# Build artifacts & Xcode generated files
+build/
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+Packages/*/.build/
+Packages/*/.swiftpm/
+
+# macOS
+.DS_Store
+
+# Never commit keys, tokens, env files, or local runtime caches
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*secret*
+*token*
+*credentials*
+auth.json
+VoiceRuntime/
