@@ -6,6 +6,15 @@
     <description>Cosign updates</description>
     <language>en</language>
     <item>
+      <title>Version 1.0.2</title>
+      <pubDate>Sat, 21 Nov 2026 02:58:56 GMT</pubDate>
+      <sparkle:version>7</sparkle:version>
+      <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/newtro/Cosign/releases/tag/v1.0.2</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/newtro/Cosign/releases/download/v1.0.2/Cosign-1.0.2.zip" type="application/octet-stream" sparkle:edSignature="sDNAopi1zD+jY+Cuw0uwT+WUeT/FQ2k5d1p/tg3k/YBme5hfzyn0+T4sSQTsV/L2gIHAueQmIGgiKvezDSC/AA==" length="4931446"/>
+    </item>
+    <item>
       <title>Version 1.0.1</title>
       <pubDate>Sat, 21 Nov 2026 02:28:36 GMT</pubDate>
       <sparkle:version>5</sparkle:version>
