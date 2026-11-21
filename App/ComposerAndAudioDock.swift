@@ -292,37 +292,46 @@ struct StudioComposerDock: View {
                 }
             }
 
-            // Main Prompt Input Row
+            // Main Prompt Input Row (Static NSTextField placeholder + SwiftUI overlay avoids AppKit IMKInputSession re-entrant RunLoop lockup!)
+            let placeholderText = session.entries.isEmpty
+                ? (session.activeMode == .build
+                    ? "Describe the project or feature for the council to build… (VoiceSmith ready)"
+                    : "Pitch an idea or question for the council… (VoiceSmith ready)")
+                : (session.activeMode == .build
+                    ? "Ask for the next feature, fix, or @mention a specialist…"
+                    : "Follow up, push back, or @mention a panelist…")
+
             HStack(alignment: .bottom, spacing: 12) {
-                TextField(
-                    session.entries.isEmpty
-                        ? (session.activeMode == .build
-                            ? "Describe the project or feature for the council to build… (VoiceSmith ready)"
-                            : "Pitch an idea or question for the council… (VoiceSmith ready)")
-                        : (session.activeMode == .build
-                            ? "Ask for the next feature, fix, or @mention a specialist…"
-                            : "Follow up, push back, or @mention a panelist…"),
-                    text: $draftText,
-                    axis: .vertical
-                )
-                .lineLimit(1...6)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14.5))
-                .foregroundStyle(StudioTheme.inkPrimary)
-                .focused($isInputFocused)
-                .onKeyPress(keys: [.return], phases: .down) { press in
-                    if press.modifiers.contains(.shift) {
-                        return .ignored
+                ZStack(alignment: .topLeading) {
+                    if draftText.isEmpty {
+                        Text(placeholderText)
+                            .font(.system(size: 14.5))
+                            .foregroundStyle(StudioTheme.inkMuted.opacity(0.75))
+                            .lineLimit(1)
+                            .padding(.vertical, 6)
+                            .allowsHitTesting(false)
                     }
-                    if !session.stage.isBusy && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        let toSend = draftText
-                        draftText = ""
-                        model.sendPrompt(toSend)
-                        return .handled
-                    }
-                    return .ignored
+
+                    TextField("", text: $draftText, axis: .vertical)
+                        .lineLimit(1...6)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14.5))
+                        .foregroundStyle(StudioTheme.inkPrimary)
+                        .focused($isInputFocused)
+                        .onKeyPress(keys: [.return], phases: .down) { press in
+                            if press.modifiers.contains(.shift) {
+                                return .ignored
+                            }
+                            if !session.stage.isBusy && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                let toSend = draftText
+                                draftText = ""
+                                model.sendPrompt(toSend)
+                                return .handled
+                            }
+                            return .ignored
+                        }
+                        .padding(.vertical, 6)
                 }
-                .padding(.vertical, 6)
 
                 if session.stage.isBusy {
                     Button {

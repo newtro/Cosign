@@ -164,6 +164,7 @@ final class AppModel: ObservableObject {
     // MARK: - Session Management
 
     func createNewSession(preset: PanelPreset? = nil, forceMode: CouncilMode? = nil) {
+        NSApp.keyWindow?.makeFirstResponder(nil)
         stopCurrentRun()
         let modeToUse = forceMode ?? (preferences.defaultMode ?? .debate)
         let defaultPresetIDForMode = modeToUse == .build
@@ -202,11 +203,13 @@ final class AppModel: ObservableObject {
 
     func selectSession(_ id: UUID) {
         guard selectedSessionID != id else { return }
+        NSApp.keyWindow?.makeFirstResponder(nil)
         selectedSessionID = id
         lastErrorBanner = nil
     }
 
     func deleteSession(_ id: UUID) {
+        NSApp.keyWindow?.makeFirstResponder(nil)
         if currentSession?.id == id {
             stopCurrentRun()
         }

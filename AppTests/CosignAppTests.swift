@@ -33,6 +33,52 @@ final class CosignAppTests: XCTestCase {
         )
         appModel.upsertPersona(custom)
         XCTAssertTrue(appModel.personas.contains(where: { $0.name == "Dr. Nova" }))
+
+        // Populate session 1 with entries, create a 4-debater Build session 2, and verify switching back & forth in NSHostingView never deadlocks!
+        var populated = appModel.sessions[0]
+        populated.stage = .completed
+        populated.entries = [
+            .userPrompt(UserPromptMessage(text: "First session prompt")),
+            .verdict(CosignVerdict(
+                moderatorID: DefaultRoster.veraID,
+                moderatorName: "Vera",
+                headline: "Ship It",
+                spokenVerdict: "Ship it cleanly.",
+                recommendation: "Done."
+            ))
+        ]
+        appModel.sessions[0] = populated
+
+        appModel.createNewTaskBuildSession()
+        if let buildSession = appModel.currentSession {
+            appModel.updateCurrentSessionLineup(
+                moderatorID: buildSession.moderatorID,
+                debaterIDs: buildSession.debaterIDs + [custom.id]
+            )
+        }
+
+        let hosting = NSHostingView(rootView: CosignRootView(model: appModel).environment(\.colorScheme, .dark))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1280, height: 860)
+        let window = NSWindow(
+            contentRect: hosting.frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+
+        // Switch from 4-debater empty Build session -> populated Debate session -> back
+        appModel.selectSession(populated.id)
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+        XCTAssertEqual(appModel.selectedSessionID, populated.id)
+
+        appModel.selectSession(appModel.sessions[0].id)
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+        XCTAssertEqual(appModel.selectedSessionID, appModel.sessions[0].id)
     }
 
     func testOptionalVisualUISnapshots() throws {

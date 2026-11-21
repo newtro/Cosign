@@ -83,13 +83,6 @@ final class CosignAppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Main Studio Window View
 
-private struct BottomSentinelMaxYKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 struct CosignRootView: View {
     @ObservedObject var model: AppModel
 
@@ -122,125 +115,110 @@ struct CosignRootView: View {
                                         isComposerFocused = true
                                     }
                                 }
+                                .id("empty-\(session.id.uuidString)")
                             } else {
-                                GeometryReader { scrollViewport in
-                                    ScrollViewReader { proxy in
-                                        ZStack(alignment: .bottomTrailing) {
-                                            ScrollView {
-                                                LazyVStack(alignment: .leading, spacing: 14) {
-                                                    ForEach(session.entries) { entry in
-                                                        timelineEntryView(entry)
-                                                            .id(entry.id)
-                                                            .transition(.opacity.combined(with: .move(edge: .bottom)))
-                                                    }
+                                ScrollViewReader { proxy in
+                                    ZStack(alignment: .bottomTrailing) {
+                                        ScrollView {
+                                            LazyVStack(alignment: .leading, spacing: 14) {
+                                                ForEach(session.entries) { entry in
+                                                    timelineEntryView(entry)
+                                                        .id(entry.id)
+                                                }
 
-                                                    if session.stage.isBusy {
-                                                        LiveThinkingPulseRow(model: model, session: session)
-                                                            .id("live-pulse-anchor")
-                                                    } else if session.stage == .completed && !session.entries.isEmpty {
-                                                        SessionCompletedFinaleCard(model: model, session: session)
-                                                            .id("session-complete-anchor")
-                                                    }
+                                                if session.stage.isBusy {
+                                                    LiveThinkingPulseRow(model: model, session: session)
+                                                        .id("live-pulse-anchor")
+                                                } else if session.stage == .completed && !session.entries.isEmpty {
+                                                    SessionCompletedFinaleCard(model: model, session: session)
+                                                        .id("session-complete-anchor")
+                                                }
 
-                                                    // Invisible bottom sentinel for exact scroll-position tracking & jump-to-bottom
-                                                    GeometryReader { sentinelGeo in
-                                                        Color.clear
-                                                            .preference(
-                                                                key: BottomSentinelMaxYKey.self,
-                                                                value: sentinelGeo.frame(in: .named("timelineScrollSpace")).maxY
-                                                            )
-                                                    }
+                                                // Lightweight AppKit NSScrollView observer (zero PreferenceKey / zero AttributeGraph cycle!)
+                                                ScrollNearBottomProbe(isNearBottom: $isScrolledNearBottom)
                                                     .frame(height: 1)
                                                     .id("timeline-bottom-sentinel")
-                                                }
-                                                .padding(.horizontal, horizontalMargin)
-                                                .padding(.top, 18)
-                                                .padding(.bottom, 14)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
                                             }
-                                            .coordinateSpace(name: "timelineScrollSpace")
-                                            .onPreferenceChange(BottomSentinelMaxYKey.self) { sentinelMaxY in
-                                                let threshold = scrollViewport.size.height + 64
-                                                let nearBottom = sentinelMaxY <= threshold || sentinelMaxY == 0
-                                                if nearBottom != isScrolledNearBottom {
-                                                    isScrolledNearBottom = nearBottom
-                                                }
-                                            }
-                                            .onChange(of: session.entries.count) { _, _ in
-                                                guard isScrolledNearBottom else { return }
-                                                if let lastEntry = session.entries.last {
-                                                    let isVerdict: Bool = {
-                                                        if case .verdict = lastEntry { return true }
-                                                        return false
-                                                    }()
-                                                    withAnimation(.easeOut(duration: 0.26)) {
-                                                        if isVerdict {
-                                                            proxy.scrollTo(lastEntry.id, anchor: .top)
-                                                        } else {
-                                                            proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
-                                                        }
+                                            .padding(.horizontal, horizontalMargin)
+                                            .padding(.top, 18)
+                                            .padding(.bottom, 14)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                        .onChange(of: session.entries.count) { _, _ in
+                                            guard isScrolledNearBottom else { return }
+                                            if let lastEntry = session.entries.last {
+                                                let isVerdict: Bool = {
+                                                    if case .verdict = lastEntry { return true }
+                                                    return false
+                                                }()
+                                                withAnimation(.easeOut(duration: 0.26)) {
+                                                    if isVerdict {
+                                                        proxy.scrollTo(lastEntry.id, anchor: .top)
+                                                    } else {
+                                                        proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
                                                     }
                                                 }
                                             }
-                                            .onChange(of: session.stage) { _, newStage in
-                                                if newStage == .completed && isScrolledNearBottom {
-                                                    let lastIsVerdict: Bool = {
-                                                        if let last = session.entries.last, case .verdict = last { return true }
-                                                        return false
-                                                    }()
-                                                    if !lastIsVerdict {
-                                                        withAnimation(.easeOut(duration: 0.3)) {
-                                                            proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
-                                                        }
+                                        }
+                                        .onChange(of: session.stage) { _, newStage in
+                                            if newStage == .completed && isScrolledNearBottom {
+                                                let lastIsVerdict: Bool = {
+                                                    if let last = session.entries.last, case .verdict = last { return true }
+                                                    return false
+                                                }()
+                                                if !lastIsVerdict {
+                                                    withAnimation(.easeOut(duration: 0.3)) {
+                                                        proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
                                                     }
                                                 }
                                             }
-                                            .onChange(of: scrollToBottomTrigger) { _, _ in
-                                                withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
-                                                    proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
-                                                }
+                                        }
+                                        .onChange(of: scrollToBottomTrigger) { _, _ in
+                                            withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                                                proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
                                             }
+                                        }
 
-                                            // Floating "Scroll to Bottom" Action Pill whenever user scrolls up
-                                            if !isScrolledNearBottom {
-                                                Button {
-                                                    scrollToBottomTrigger += 1
-                                                } label: {
-                                                    HStack(spacing: 7) {
-                                                        if session.stage.isBusy {
-                                                            Circle()
-                                                                .fill(StudioTheme.brassBright)
-                                                                .frame(width: 7, height: 7)
-                                                        }
-                                                        Image(systemName: "arrow.down")
-                                                            .font(.system(size: 11.5, weight: .bold))
-                                                        Text(session.stage.isBusy ? "Jump to Live Turn" : "Scroll to Bottom")
-                                                            .font(.system(size: 12, weight: .semibold))
+                                        // Floating "Scroll to Bottom" Action Pill whenever user scrolls up
+                                        if !isScrolledNearBottom {
+                                            Button {
+                                                scrollToBottomTrigger += 1
+                                            } label: {
+                                                HStack(spacing: 7) {
+                                                    if session.stage.isBusy {
+                                                        Circle()
+                                                            .fill(StudioTheme.brassBright)
+                                                            .frame(width: 7, height: 7)
                                                     }
-                                                    .foregroundStyle(StudioTheme.inkPrimary)
-                                                    .padding(.horizontal, 14)
-                                                    .padding(.vertical, 8)
-                                                    .background(
-                                                        Capsule(style: .continuous)
-                                                            .fill(StudioTheme.cardElevated.opacity(0.96))
-                                                            .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
-                                                    )
-                                                    .overlay(
-                                                        Capsule(style: .continuous)
-                                                            .strokeBorder(
-                                                                (session.stage.isBusy ? StudioTheme.brassBright : StudioTheme.emerald).opacity(0.55),
-                                                                lineWidth: 1.1
-                                                            )
-                                                    )
+                                                    Image(systemName: "arrow.down")
+                                                        .font(.system(size: 11.5, weight: .bold))
+                                                    Text(session.stage.isBusy ? "Jump to Live Turn" : "Scroll to Bottom")
+                                                        .font(.system(size: 12, weight: .semibold))
                                                 }
-                                                .buttonStyle(.plain)
-                                                .padding(.trailing, horizontalMargin + 6)
-                                                .padding(.bottom, 12)
-                                                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                                .foregroundStyle(StudioTheme.inkPrimary)
+                                                .padding(.horizontal, 14)
+                                                .padding(.vertical, 8)
+                                                .background(
+                                                    Capsule(style: .continuous)
+                                                        .fill(StudioTheme.cardElevated.opacity(0.96))
+                                                        .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
+                                                )
+                                                .overlay(
+                                                    Capsule(style: .continuous)
+                                                        .strokeBorder(
+                                                            (session.stage.isBusy ? StudioTheme.brassBright : StudioTheme.emerald).opacity(0.55),
+                                                            lineWidth: 1.1
+                                                        )
+                                                )
                                             }
+                                            .buttonStyle(.plain)
+                                            .padding(.trailing, horizontalMargin + 6)
+                                            .padding(.bottom, 12)
+                                            .transition(.opacity.combined(with: .move(edge: .bottom)))
                                         }
                                     }
                                 }
+                                .id("stream-\(session.id.uuidString)")
                             }
 
                             // Floating Composer & Live Audio Transport Bar (Fluid width matching timeline)
@@ -258,6 +236,9 @@ struct CosignRootView: View {
                     }
                 }
             }
+        }
+        .onChange(of: model.selectedSessionID) { _, _ in
+            isScrolledNearBottom = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .cosignScrollToBottom)) { _ in
             scrollToBottomTrigger += 1
@@ -704,6 +685,100 @@ private final class WindowGeometryObserverView: NSView {
     }
 
     private func tearDownObservers() {
+        for t in tokens {
+            NotificationCenter.default.removeObserver(t)
+        }
+        tokens.removeAll()
+    }
+
+    deinit {
+        for t in tokens {
+            NotificationCenter.default.removeObserver(t)
+        }
+    }
+}
+
+// MARK: - Zero-Cycle AppKit ScrollView Near-Bottom Probe
+
+private struct ScrollNearBottomProbe: NSViewRepresentable {
+    @Binding var isNearBottom: Bool
+
+    func makeNSView(context: Context) -> ScrollProbeNSView {
+        let view = ScrollProbeNSView()
+        view.onNearBottomChanged = { near in
+            DispatchQueue.main.async {
+                if self.isNearBottom != near {
+                    self.isNearBottom = near
+                }
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrollProbeNSView, context: Context) {}
+}
+
+private final class ScrollProbeNSView: NSView {
+    var onNearBottomChanged: ((Bool) -> Void)?
+    private weak var observedClipView: NSClipView?
+    private var tokens: [NSObjectProtocol] = []
+    private var lastReported: Bool?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        attachIfNeeded()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        attachIfNeeded()
+    }
+
+    private func attachIfNeeded() {
+        guard let scrollView = enclosingScrollView else { return }
+        let clip = scrollView.contentView
+        guard clip !== observedClipView else { return }
+        tearDown()
+        observedClipView = clip
+        clip.postsBoundsChangedNotifications = true
+        clip.postsFrameChangedNotifications = true
+
+        let nc = NotificationCenter.default
+        let handler: (Notification) -> Void = { [weak self] _ in
+            self?.evaluatePosition()
+        }
+        tokens.append(nc.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main, using: handler))
+        tokens.append(nc.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main, using: handler))
+        if let doc = scrollView.documentView {
+            doc.postsFrameChangedNotifications = true
+            tokens.append(nc.addObserver(forName: NSView.frameDidChangeNotification, object: doc, queue: .main, using: handler))
+        }
+        evaluatePosition()
+    }
+
+    private func evaluatePosition() {
+        guard let scrollView = enclosingScrollView,
+              let doc = scrollView.documentView else { return }
+        let clip = scrollView.contentView
+        let docHeight = doc.bounds.height
+        let clipHeight = clip.bounds.height
+
+        let near: Bool
+        if docHeight <= clipHeight + 72 {
+            near = true
+        } else if doc.isFlipped {
+            near = clip.bounds.maxY >= (docHeight - 72)
+        } else {
+            near = clip.bounds.minY <= 72
+        }
+
+        if lastReported != near {
+            lastReported = near
+            onNearBottomChanged?(near)
+        }
+    }
+
+    private func tearDown() {
         for t in tokens {
             NotificationCenter.default.removeObserver(t)
         }
