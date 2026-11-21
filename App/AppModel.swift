@@ -29,6 +29,7 @@ final class AppModel: ObservableObject {
     @Published var showingPersonaStudio: Bool = false
     @Published var studioInitialPersonaID: UUID?
     @Published var showingLineupPopover: Bool = false
+    @Published var activeHandoffVerdict: CosignVerdict?
 
     let store: SessionStore
     let voiceEngine: VoiceEngine
@@ -457,6 +458,34 @@ final class AppModel: ObservableObject {
                 self.recordError(error.localizedDescription, on: session.id)
             }
         }
+    }
+
+    func openHandoffSheet(for verdict: CosignVerdict? = nil) {
+        if let verdict {
+            activeHandoffVerdict = verdict
+            return
+        }
+        if let current = currentSession {
+            for entry in current.entries.reversed() {
+                if case .verdict(let v) = entry {
+                    activeHandoffVerdict = v
+                    return
+                }
+            }
+        }
+    }
+
+    func generateTailoredHandoff(baseHandoff: String, customInstruction: String) async throws -> String {
+        guard let session = currentSession else { return baseHandoff }
+        let moderator = activeModerator(for: session)
+        let orKey = KeychainHelper.read(account: "openrouter")
+        return try await orchestrator.synthesizeTailoredHandoffPrompt(
+            session: session,
+            moderator: moderator,
+            baseHandoff: baseHandoff,
+            customInstruction: customInstruction,
+            openRouterKey: orKey
+        )
     }
 
     func stopCurrentRun() {

@@ -348,6 +348,37 @@ public final class DebateOrchestrator: Sendable {
         return session
     }
 
+    /// Synthesizes a tailored coding-harness handoff prompt using the Chair when the user wants custom AI synthesis/filtering.
+    public func synthesizeTailoredHandoffPrompt(
+        session: DebateSession,
+        moderator: Persona,
+        baseHandoff: String,
+        customInstruction: String,
+        openRouterKey: String? = nil
+    ) async throws -> String {
+        let fullInput = """
+        SESSION TRANSCRIPT & VERDICT SUMMARY:
+        \(buildTranscriptContext(for: session))
+
+        ---
+
+        STRUCTURED DRAFT HANDOFF:
+        \(baseHandoff)
+        """
+        let resp = try await runner.call(ModelCallRequest(
+            provider: moderator.provider,
+            modelID: moderator.modelID,
+            effort: .medium,
+            systemPrompt: DebatePrompts.handoffSynthesisSystemPrompt(moderator: moderator, customInstruction: customInstruction),
+            userPrompt: fullInput,
+            allowWebSearch: false,
+            toolPhase: .closedBook,
+            workspacePath: session.workspacePath,
+            openRouterAPIKey: openRouterKey
+        ))
+        return resp.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Core Multi-Round Debate Engine (With Live Inter-Persona Dialogue)
 
     private func runDebateToVerdict(

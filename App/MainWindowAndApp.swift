@@ -143,6 +143,11 @@ struct CosignRootView: View {
         .sheet(isPresented: $model.showingPersonaStudio) {
             PersonaStudioSheet(model: model)
         }
+        .sheet(item: $model.activeHandoffVerdict) { verdict in
+            if let session = model.currentSession {
+                HandoffPromptSheet(model: model, session: session, verdict: verdict)
+            }
+        }
     }
 
     @ViewBuilder

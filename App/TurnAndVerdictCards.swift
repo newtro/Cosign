@@ -680,6 +680,18 @@ struct CosignVerdictCardView: View {
                 }
 
                 Button {
+                    model.openHandoffSheet(for: verdict)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "terminal.fill")
+                            .font(.system(size: 10.5))
+                        Text("Handoff Prompt")
+                    }
+                }
+                .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.emerald, active: true))
+                .help("Build and copy a coding-harness handoff prompt with all recommendations while keeping this conversation live")
+
+                Button {
                     model.replayVerdict(verdict)
                 } label: {
                     HStack(spacing: 5) {
@@ -935,5 +947,266 @@ struct CosignVerdictCardView: View {
             glowColor: StudioTheme.brass,
             glowIntensity: isSpeakingNow ? 0.36 : 0.18
         )
+    }
+}
+
+// MARK: - Coding Harness Handoff Prompt Sheet
+
+struct HandoffPromptSheet: View {
+    @ObservedObject var model: AppModel
+    let session: DebateSession
+    let verdict: CosignVerdict
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedSteps: Set<Int> = []
+    @State private var includeFileAssignments: Bool = true
+    @State private var includeGuardrails: Bool = true
+    @State private var steeringNote: String = ""
+    @State private var promptText: String = ""
+    @State private var isTailoringWithAI: Bool = false
+    @State private var copiedToast: Bool = false
+    @State private var tailorError: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(StudioTheme.emerald.opacity(0.18))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "terminal.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(StudioTheme.emerald)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Coding Harness Handoff Prompt")
+                        .font(.system(size: 17, weight: .bold, design: .serif))
+                        .foregroundStyle(StudioTheme.inkPrimary)
+                    Text("Ready to paste into Claude Code, Codex, or Antigravity — your council session stays open for follow-ups.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(StudioTheme.inkSecondary)
+                }
+
+                Spacer()
+
+                Button("Done") {
+                    dismiss()
+                }
+                .buttonStyle(StudioPillButtonStyle())
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 16)
+            .background(StudioTheme.sidebarBg)
+
+            Divider().overlay(Color.white.opacity(0.08))
+
+            HStack(spacing: 0) {
+                // Left Controls: Scope & Optional AI Tailoring
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if !verdict.actionSteps.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("INCLUDED STEPS")
+                                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                        .tracking(0.9)
+                                        .foregroundStyle(StudioTheme.brassBright)
+                                    Spacer()
+                                    Button(selectedSteps.count == verdict.actionSteps.count ? "None" : "All") {
+                                        if selectedSteps.count == verdict.actionSteps.count {
+                                            selectedSteps.removeAll()
+                                        } else {
+                                            selectedSteps = Set(verdict.actionSteps.indices)
+                                        }
+                                        rebuildStructuredPrompt()
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(StudioTheme.sky)
+                                }
+
+                                ForEach(Array(verdict.actionSteps.enumerated()), id: \.offset) { idx, step in
+                                    let on = selectedSteps.contains(idx)
+                                    Button {
+                                        if on { selectedSteps.remove(idx) } else { selectedSteps.insert(idx) }
+                                        rebuildStructuredPrompt()
+                                    } label: {
+                                        HStack(alignment: .top, spacing: 8) {
+                                            Image(systemName: on ? "checkmark.square.fill" : "square")
+                                                .foregroundStyle(on ? StudioTheme.emerald : StudioTheme.inkMuted)
+                                                .padding(.top, 1)
+                                            Text("\(idx + 1). \(step)")
+                                                .font(.system(size: 11.5))
+                                                .foregroundStyle(on ? StudioTheme.inkPrimary : StudioTheme.inkMuted)
+                                                .lineLimit(3)
+                                                .multilineTextAlignment(.leading)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(7)
+                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(on ? 0.05 : 0.02)))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        Divider().overlay(Color.white.opacity(0.07))
+
+                        VStack(alignment: .leading, spacing: 9) {
+                            Text("SECTIONS")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .tracking(0.9)
+                                .foregroundStyle(StudioTheme.brassBright)
+
+                            Toggle("Include file-level workstreams", isOn: $includeFileAssignments)
+                                .font(.system(size: 12))
+                                .onChange(of: includeFileAssignments) { _, _ in rebuildStructuredPrompt() }
+
+                            Toggle("Include trade-offs & dissent guardrails", isOn: $includeGuardrails)
+                                .font(.system(size: 12))
+                                .onChange(of: includeGuardrails) { _, _ in rebuildStructuredPrompt() }
+                        }
+
+                        Divider().overlay(Color.white.opacity(0.07))
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("OPTIONAL FOCUS / EXTRA NOTE")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .tracking(0.9)
+                                .foregroundStyle(StudioTheme.brassBright)
+
+                            TextField("e.g. Focus only on Phase 1 C# UI changes…", text: $steeringNote, axis: .vertical)
+                                .lineLimit(2...4)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12))
+                                .foregroundStyle(StudioTheme.inkPrimary)
+                                .padding(9)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(StudioTheme.drawerBg))
+                                .onChange(of: steeringNote) { _, _ in rebuildStructuredPrompt() }
+
+                            Button {
+                                runAITailor()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if isTailoringWithAI {
+                                        ProgressView().controlSize(.mini)
+                                    } else {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 11))
+                                    }
+                                    Text(isTailoringWithAI ? "Synthesizing with \(verdict.moderatorName)…" : "Tailor Prompt with \(verdict.moderatorName)")
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: true))
+                            .disabled(isTailoringWithAI)
+
+                            if let tailorError {
+                                Text(tailorError)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(StudioTheme.crimson)
+                            }
+                        }
+                    }
+                    .padding(16)
+                }
+                .frame(width: 315)
+                .background(StudioTheme.sidebarBg.opacity(0.75))
+
+                Divider().overlay(Color.white.opacity(0.08))
+
+                // Right Editable Markdown Preview
+                VStack(alignment: .leading, spacing: 0) {
+                    TextEditor(text: $promptText)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .lineSpacing(3.5)
+                        .scrollContentBackground(.hidden)
+                        .foregroundStyle(StudioTheme.inkPrimary)
+                        .padding(16)
+                        .background(StudioTheme.drawerBg)
+
+                    Divider().overlay(Color.white.opacity(0.08))
+
+                    HStack {
+                        Button("Reset to Full Structured Handoff") {
+                            rebuildStructuredPrompt()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(StudioTheme.inkMuted)
+
+                        Spacer()
+
+                        if copiedToast {
+                            Label("Copied to Clipboard!", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(StudioTheme.emerald)
+                                .padding(.trailing, 6)
+                        }
+
+                        Button {
+                            copyToClipboard()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "doc.on.doc.fill")
+                                    .font(.system(size: 11.5))
+                                Text("Copy Handoff Prompt")
+                            }
+                        }
+                        .buttonStyle(BrassPrimaryButtonStyle())
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 13)
+                    .background(StudioTheme.sidebarBg)
+                }
+            }
+        }
+        .frame(width: 940, height: 660)
+        .background(StudioTheme.canvasTop)
+        .preferredColorScheme(.dark)
+        .onAppear {
+            selectedSteps = Set(verdict.actionSteps.indices)
+            rebuildStructuredPrompt()
+        }
+    }
+
+    private func rebuildStructuredPrompt() {
+        promptText = HandoffPromptBuilder.build(
+            session: session,
+            verdict: verdict,
+            selectedStepIndices: selectedSteps,
+            includeFileAssignments: includeFileAssignments,
+            includeGuardrails: includeGuardrails,
+            extraUserNote: steeringNote
+        )
+    }
+
+    private func copyToClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(promptText, forType: .string)
+        copiedToast = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            copiedToast = false
+        }
+    }
+
+    private func runAITailor() {
+        isTailoringWithAI = true
+        tailorError = nil
+        let currentDraft = promptText
+        let note = steeringNote
+        Task {
+            do {
+                let refined = try await model.generateTailoredHandoff(baseHandoff: currentDraft, customInstruction: note)
+                if !refined.isEmpty {
+                    promptText = refined
+                }
+            } catch {
+                tailorError = error.localizedDescription
+            }
+            isTailoringWithAI = false
+        }
     }
 }

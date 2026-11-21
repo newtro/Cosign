@@ -352,4 +352,21 @@ public enum DebatePrompts {
         }
         """
     }
+
+    public static func handoffSynthesisSystemPrompt(moderator: Persona, customInstruction: String) -> String {
+        let extra = customInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        let focusRule = extra.isEmpty
+            ? "Include all agreed recommendations, concrete file paths, phased implementation steps, guardrails, and verification steps."
+            : "IMPORTANT USER FOCUS FOR THIS HANDOFF: \(extra)"
+        return """
+        You are \(moderator.name), preparing a crisp, self-contained Coding Agent Handoff Prompt in Markdown based on this Cosign council session.
+        The user will copy and paste your output directly into an autonomous coding harness (like Claude Code, Codex, or Antigravity) to execute the work.
+
+        RULES:
+        - Output ONLY the clean Markdown handoff prompt itself (no surrounding commentary like "Here is your prompt:").
+        - Write imperative, unambiguous instructions addressed to the coding agent.
+        - Preserve exact file paths, script names, architectural constraints, deadlines/gates, and watchouts discovered during the council debate.
+        - \(focusRule)
+        """
+    }
 }

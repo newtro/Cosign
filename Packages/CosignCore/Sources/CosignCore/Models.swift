@@ -573,6 +573,152 @@ public struct CosignVerdict: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+public enum HandoffPromptBuilder {
+    /// Builds a clean, self-contained implementation handoff prompt ready to paste into any coding harness
+    /// (Claude Code, Codex, Antigravity, Cursor, etc.), incorporating workspace context, user constraints,
+    /// the Co-Signed Verdict, file-scoped assignments, guardrails, and any post-verdict follow-up refinements.
+    public static func build(
+        session: DebateSession,
+        verdict: CosignVerdict,
+        selectedStepIndices: Set<Int>? = nil,
+        includeFileAssignments: Bool = true,
+        includeGuardrails: Bool = true,
+        extraUserNote: String = ""
+    ) -> String {
+        var out: [String] = []
+
+        out.append("# Implementation Handoff: \(verdict.headline)")
+        out.append("")
+        if let ws = session.workspacePath, !ws.isEmpty {
+            out.append("**Workspace / Repo Context:** `\(ws)`")
+            out.append("")
+        }
+
+        // Original Goal & Clarified Constraints
+        let userPrompts = session.entries.compactMap { entry -> String? in
+            if case .userPrompt(let m) = entry { return m.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            return nil
+        }
+        if let initialGoal = userPrompts.first, !initialGoal.isEmpty {
+            out.append("## Goal & Context")
+            out.append(initialGoal)
+            out.append("")
+        }
+
+        let answeredQuestions = session.entries.compactMap { entry -> [InterviewQuestion]? in
+            if case .interview(let ex) = entry, ex.isSubmitted, !ex.wasSkipped {
+                return ex.questions
+            }
+            return nil
+        }.flatMap { $0 }
+
+        if !answeredQuestions.isEmpty {
+            out.append("### Clarified Constraints")
+            for q in answeredQuestions {
+                if !q.delegateToPanel {
+                    let ans = q.answer.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !ans.isEmpty {
+                        out.append("- **\(q.question)** → \(ans)")
+                    }
+                }
+            }
+            out.append("")
+        }
+
+        // Core Co-Signed Direction
+        out.append("## Agreed Architecture & Strategy")
+        let cleanBottomLine = verdict.spokenVerdict
+            .replacingOccurrences(of: #"\[(chuckle|laugh|sigh|clear throat|cough|gasp|groan)\]"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanBottomLine.isEmpty {
+            out.append("> **Bottom Line:** \(cleanBottomLine)")
+            out.append("")
+        }
+        if !verdict.recommendation.isEmpty {
+            out.append(verdict.recommendation)
+            out.append("")
+        }
+
+        // Scoped Action Steps
+        if !verdict.actionSteps.isEmpty {
+            let indices = selectedStepIndices ?? Set(verdict.actionSteps.indices)
+            let chosenSteps = verdict.actionSteps.enumerated().filter { indices.contains($0.offset) }
+            if !chosenSteps.isEmpty {
+                out.append("## Actionable Implementation Steps")
+                for (displayIdx, pair) in chosenSteps.enumerated() {
+                    out.append("\(displayIdx + 1). \(pair.element)")
+                }
+                out.append("")
+            }
+        }
+
+        // Concrete File-Level Specifications (if Chair produced scoped assignments)
+        if includeFileAssignments, let assignments = verdict.executionAssignments, !assignments.isEmpty {
+            out.append("## Detailed File & Module Breakdown")
+            for (idx, item) in assignments.enumerated() {
+                out.append("### Workstream \(idx + 1)")
+                if !item.targetScope.isEmpty {
+                    out.append("- **Target Files / Scope:** `\(item.targetScope)`")
+                }
+                out.append("- **Instructions:** \(item.taskInstruction)")
+                out.append("")
+            }
+        }
+
+        // Post-Verdict Follow-Up Refinements (if user continued chatting after the verdict)
+        if let verdictIndex = session.entries.firstIndex(where: { $0.id == verdict.id }),
+           verdictIndex + 1 < session.entries.count {
+            let trailingEntries = session.entries[(verdictIndex + 1)...]
+            var followUps: [String] = []
+            for entry in trailingEntries {
+                switch entry {
+                case .userPrompt(let msg):
+                    followUps.append("- **User Follow-Up:** \(msg.text)")
+                case .turn(let t):
+                    let clean = t.spokenTake
+                        .replacingOccurrences(of: #"\[(chuckle|laugh|sigh|clear throat|cough|gasp|groan)\]"#, with: "", options: .regularExpression)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    followUps.append("- **\(t.personaName) (\(t.personaTitle)):** \(clean)")
+                default:
+                    break
+                }
+            }
+            if !followUps.isEmpty {
+                out.append("## Follow-Up Refinements from Discussion")
+                out.append(contentsOf: followUps)
+                out.append("")
+            }
+        }
+
+        // Guardrails, Trade-offs & Minority Caveats
+        if includeGuardrails && (!verdict.keyTradeoffs.isEmpty || !verdict.dissents.isEmpty) {
+            out.append("## Guardrails & Trade-Offs to Respect")
+            for tradeoff in verdict.keyTradeoffs {
+                out.append("- \(tradeoff)")
+            }
+            for dissent in verdict.dissents {
+                out.append("- **Watchout (\(dissent.personaName)):** \(dissent.coreObjection)")
+            }
+            out.append("")
+        }
+
+        let trimmedExtra = extraUserNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedExtra.isEmpty {
+            out.append("## Additional Instructions")
+            out.append(trimmedExtra)
+            out.append("")
+        }
+
+        out.append("## Execution Expectations")
+        out.append("- Inspect the referenced files and current git state before making edits.")
+        out.append("- Implement the scoped steps cleanly, keeping changes surgical and aligned with the guardrails above.")
+        out.append("- Run the project's build and relevant tests to verify everything passes before wrapping up.")
+
+        return out.joined(separator: "\n")
+    }
+}
+
 public struct UserPromptMessage: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var text: String

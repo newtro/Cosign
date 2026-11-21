@@ -330,4 +330,103 @@ final class CosignCoreTests: XCTestCase {
         XCTAssertEqual(reloaded.count, 1)
         XCTAssertEqual(reloaded.first?.title, "Test Session")
     }
+
+    func testHandoffPromptBuilderIncludesContextStepsFollowUpsAndStripsVocalTags() {
+        let exchange = InterviewExchange(
+            moderatorID: DefaultRoster.veraID,
+            moderatorName: "Vera",
+            moderatorAccentHex: "#F59E0B",
+            spokenIntro: "Quick check.",
+            questions: [
+                InterviewQuestion(
+                    askedByName: "Marcus",
+                    question: "Should we trim partner rev-share from the draft?",
+                    whyItMatters: "Focuses the pitch.",
+                    answer: "Yes, trim rev-share for now"
+                )
+            ],
+            isSubmitted: true,
+            wasSkipped: false
+        )
+
+        let verdict = CosignVerdict(
+            moderatorID: DefaultRoster.veraID,
+            moderatorName: "Vera",
+            headline: "Sharpen APPLICATION.md Around Playable Core",
+            spokenVerdict: "[chuckle] Cut the rev-share layer and ship 10 Steam playtest keys first.",
+            recommendation: "Focus APPLICATION.md on the core multiplayer loop and measurable playtest retention.",
+            actionSteps: [
+                "Rewrite APPLICATION.md executive summary",
+                "Invite 10 external Steam playtesters",
+                "Archive deferred rev-share notes"
+            ],
+            keyTradeoffs: ["Narrower pitch scope in exchange for higher fellowship credibility"],
+            cosignedNames: ["Marcus", "Orion"],
+            dissents: [
+                MinorityDissent(
+                    personaName: "Sable",
+                    accentHex: "#EF4444",
+                    coreObjection: "Do not claim retention metrics until external sessions complete."
+                )
+            ],
+            executionAssignments: [
+                ExecutionAssignment(
+                    assignedPersonaName: "Marcus",
+                    taskInstruction: "Remove partner rev-share section and tighten traction milestones.",
+                    targetScope: "APPLICATION.md"
+                )
+            ]
+        )
+
+        let followUpTurn = DebateTurn(
+            roundNumber: 4,
+            roundLabel: "Follow-Up",
+            personaID: DefaultRoster.marcusID,
+            personaName: "Marcus",
+            personaTitle: "The Pragmatist",
+            avatarSymbol: "hammer.fill",
+            accentHex: "#10B981",
+            provider: .codex,
+            modelLabel: "GPT-6.2-Sol",
+            stance: .replying,
+            spokenTake: "[sigh] Keep the budget table under three rows too.",
+            thoughtProcess: "Concise table constraint."
+        )
+
+        let session = DebateSession(
+            title: "Fellowship Pitch",
+            moderatorID: DefaultRoster.veraID,
+            debaterIDs: [DefaultRoster.marcusID, DefaultRoster.sableID, DefaultRoster.orionID],
+            workspacePath: "/Volumes/Cache/repos/LastShard",
+            stage: .completed,
+            entries: [
+                .userPrompt(UserPromptMessage(text: "Review our fellowship application.")),
+                .interview(exchange),
+                .verdict(verdict),
+                .userPrompt(UserPromptMessage(text: "What about the budget table?")),
+                .turn(followUpTurn)
+            ]
+        )
+
+        let prompt = HandoffPromptBuilder.build(
+            session: session,
+            verdict: verdict,
+            selectedStepIndices: [0, 1],
+            includeFileAssignments: true,
+            includeGuardrails: true,
+            extraUserNote: "Preserve existing markdown headings where possible."
+        )
+
+        XCTAssertTrue(prompt.contains("`/Volumes/Cache/repos/LastShard`"))
+        XCTAssertTrue(prompt.contains("Yes, trim rev-share for now"))
+        XCTAssertFalse(prompt.contains("[chuckle]"))
+        XCTAssertFalse(prompt.contains("[sigh]"))
+        XCTAssertTrue(prompt.contains("1. Rewrite APPLICATION.md executive summary"))
+        XCTAssertTrue(prompt.contains("2. Invite 10 external Steam playtesters"))
+        XCTAssertFalse(prompt.contains("Archive deferred rev-share notes"))
+        XCTAssertTrue(prompt.contains("`APPLICATION.md`"))
+        XCTAssertTrue(prompt.contains("Keep the budget table under three rows too."))
+        XCTAssertTrue(prompt.contains("**Watchout (Sable):**"))
+        XCTAssertTrue(prompt.contains("Preserve existing markdown headings where possible."))
+    }
 }

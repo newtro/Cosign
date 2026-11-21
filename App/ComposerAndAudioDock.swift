@@ -208,6 +208,28 @@ struct StudioComposerDock: View {
                             }
                             .buttonStyle(.plain)
                         }
+
+                        Divider()
+                            .frame(height: 14)
+                            .padding(.horizontal, 4)
+
+                        Button {
+                            model.openHandoffSheet()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "terminal.fill")
+                                    .font(.system(size: 9.5))
+                                Text("Handoff Prompt")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundStyle(StudioTheme.emerald)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3.5)
+                            .background(Capsule().fill(StudioTheme.emerald.opacity(0.13)))
+                            .overlay(Capsule().strokeBorder(StudioTheme.emerald.opacity(0.30), lineWidth: 0.8))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Generate & copy a coding-harness handoff prompt with all recommendations from this conversation")
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 9)
