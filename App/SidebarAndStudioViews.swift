@@ -42,12 +42,12 @@ struct CouncilSidebarView: View {
                 }
 
                 Button {
-                    model.createNewSession()
+                    model.createNewSession(forceMode: .debate)
                 } label: {
                     HStack(spacing: 7) {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .bold))
-                        Text("New Council Session")
+                        Text("New Council Debate")
                         Spacer()
                         Text("⌘N")
                             .font(.system(size: 10.5, design: .monospaced))
@@ -56,6 +56,36 @@ struct CouncilSidebarView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(BrassPrimaryButtonStyle())
+
+                Button {
+                    model.createNewTaskBuildSession()
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "hammer.fill")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(StudioTheme.emerald)
+                        Text("New Task / Build Crew")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(StudioTheme.inkPrimary)
+                        Spacer()
+                        Text("⇧⌘N")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(StudioTheme.inkMuted)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(StudioTheme.emerald.opacity(0.12))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(StudioTheme.emerald.opacity(0.35), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Start a Build Mode session with Atlas (Tech Lead), Forge (Systems), Ember (Product), and Rook (QA Hawk)")
             }
             .padding(.horizontal, 14)
             .padding(.top, 14)

@@ -163,24 +163,41 @@ final class AppModel: ObservableObject {
 
     // MARK: - Session Management
 
-    func createNewSession(preset: PanelPreset? = nil) {
+    func createNewSession(preset: PanelPreset? = nil, forceMode: CouncilMode? = nil) {
         stopCurrentRun()
+        let modeToUse = forceMode ?? (preferences.defaultMode ?? .debate)
+        let defaultPresetIDForMode = modeToUse == .build
+            ? DefaultRoster.taskBuildCrewPresetID
+            : DefaultRoster.coreCouncilPresetID
         let chosenPreset = preset
-            ?? presets.first(where: { $0.id == preferences.activePresetID })
+            ?? presets.first(where: { $0.id == (forceMode != nil ? defaultPresetIDForMode : preferences.activePresetID) })
             ?? presets.first
         if let chosenPreset {
             preferences.activePresetID = chosenPreset.id
-            store.savePreferences(preferences)
         }
-        let fresh = Self.makeBlankSession(
+        if let forceMode {
+            preferences.defaultMode = forceMode
+        }
+        store.savePreferences(preferences)
+
+        var fresh = Self.makeBlankSession(
             presets: chosenPreset.map { [$0] } ?? presets,
             personas: personas,
             prefs: preferences
         )
+        fresh.mode = modeToUse
+        if modeToUse == .build {
+            fresh.cliToolsEnabled = true
+        }
         sessions.insert(fresh, at: 0)
         selectedSessionID = fresh.id
         lastErrorBanner = nil
         store.saveSession(fresh)
+    }
+
+    func createNewTaskBuildSession() {
+        let taskPreset = presets.first(where: { $0.id == DefaultRoster.taskBuildCrewPresetID })
+        createNewSession(preset: taskPreset, forceMode: .build)
     }
 
     func selectSession(_ id: UUID) {
@@ -204,10 +221,15 @@ final class AppModel: ObservableObject {
 
     func applyPresetToCurrentSession(_ preset: PanelPreset) {
         preferences.activePresetID = preset.id
+        let isTaskPreset = (preset.id == DefaultRoster.taskBuildCrewPresetID || preset.id == DefaultRoster.fullStackSquadPresetID)
         store.savePreferences(preferences)
         guard var session = currentSession, !session.stage.isBusy else { return }
         session.moderatorID = preset.moderatorID
         session.debaterIDs = preset.debaterIDs
+        if session.entries.isEmpty {
+            session.mode = isTaskPreset ? .build : .debate
+            if isTaskPreset { session.cliToolsEnabled = true }
+        }
         session.updatedAt = Date()
         updateSessionInPlace(session)
     }
@@ -235,6 +257,27 @@ final class AppModel: ObservableObject {
         session.mode = mode
         if mode == .build {
             session.cliToolsEnabled = true
+            // On a blank session still seated with the default Debate Council, auto-seat the Task & Build Crew!
+            if session.entries.isEmpty,
+               session.moderatorID == DefaultRoster.veraID,
+               Set(session.debaterIDs) == Set([DefaultRoster.marcusID, DefaultRoster.sableID, DefaultRoster.orionID]),
+               let taskPreset = presets.first(where: { $0.id == DefaultRoster.taskBuildCrewPresetID }) {
+                session.moderatorID = taskPreset.moderatorID
+                session.debaterIDs = taskPreset.debaterIDs
+                preferences.activePresetID = taskPreset.id
+                store.savePreferences(preferences)
+            }
+        } else if mode == .debate {
+            // If toggling back to Debate on a blank session seated with the Task & Build Crew, auto-seat The Core Council!
+            if session.entries.isEmpty,
+               session.moderatorID == DefaultRoster.atlasID,
+               Set(session.debaterIDs) == Set([DefaultRoster.forgeID, DefaultRoster.emberID, DefaultRoster.rookID]),
+               let debatePreset = presets.first(where: { $0.id == DefaultRoster.coreCouncilPresetID }) {
+                session.moderatorID = debatePreset.moderatorID
+                session.debaterIDs = debatePreset.debaterIDs
+                preferences.activePresetID = debatePreset.id
+                store.savePreferences(preferences)
+            }
         }
         updateSessionInPlace(session)
     }

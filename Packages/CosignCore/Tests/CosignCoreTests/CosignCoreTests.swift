@@ -614,4 +614,25 @@ final class CosignCoreTests: XCTestCase {
             XCTFail("Expected healed turn")
         }
     }
+
+    func testTaskBuildCrewRosterAndUpgradeMerge() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-merge-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = SessionStore(rootDirectory: tempDir)
+        // Simulate an older v1.0 install that only saved the original 4 personas and 1 preset
+        let legacyPersonas = Array(DefaultRoster.personas.prefix(4))
+        let legacyPresets = [DefaultRoster.presets[0]]
+        store.savePersonas(legacyPersonas)
+        store.savePresets(legacyPresets)
+
+        let mergedPersonas = store.loadPersonas()
+        let mergedPresets = store.loadPresets()
+
+        XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.atlasID && $0.name == "Atlas" }))
+        XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.forgeID && $0.name == "Forge" }))
+        XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.emberID && $0.name == "Ember" }))
+        XCTAssertTrue(mergedPersonas.contains(where: { $0.id == DefaultRoster.rookID && $0.name == "Rook" }))
+        XCTAssertTrue(mergedPresets.contains(where: { $0.id == DefaultRoster.taskBuildCrewPresetID && $0.name == "Task & Build Crew" }))
+    }
 }

@@ -745,26 +745,32 @@ public final class DebateOrchestrator: Sendable {
     }
 
     private func selectVerifier(from debaters: [Persona], fallback: Persona) -> Persona {
-        if let skeptic = debaters.first(where: {
-            $0.name.localizedCaseInsensitiveContains("Sable")
+        if let verifier = debaters.first(where: {
+            $0.name.localizedCaseInsensitiveContains("Rook")
+            || $0.name.localizedCaseInsensitiveContains("Sable")
+            || $0.title.localizedCaseInsensitiveContains("QA")
+            || $0.title.localizedCaseInsensitiveContains("Verification")
             || $0.title.localizedCaseInsensitiveContains("Skeptic")
             || $0.title.localizedCaseInsensitiveContains("Critic")
             || $0.title.localizedCaseInsensitiveContains("Security")
         }) {
-            return skeptic
+            return verifier
         }
         return debaters.last ?? fallback
     }
 
     private func selectPrimaryBuilder(from debaters: [Persona], excluding: Persona?, fallback: Persona) -> Persona {
         let candidates = debaters.filter { $0.id != excluding?.id }
-        if let pragmatist = candidates.first(where: {
-            $0.name.localizedCaseInsensitiveContains("Marcus")
+        if let builder = candidates.first(where: {
+            $0.name.localizedCaseInsensitiveContains("Forge")
+            || $0.name.localizedCaseInsensitiveContains("Marcus")
+            || $0.title.localizedCaseInsensitiveContains("Systems")
             || $0.title.localizedCaseInsensitiveContains("Pragmatist")
             || $0.title.localizedCaseInsensitiveContains("Builder")
+            || $0.title.localizedCaseInsensitiveContains("Engineer")
             || $0.title.localizedCaseInsensitiveContains("Architect")
         }) {
-            return pragmatist
+            return builder
         }
         return candidates.first ?? fallback
     }

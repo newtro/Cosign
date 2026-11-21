@@ -117,11 +117,21 @@ public final class SessionStore: @unchecked Sendable {
 
     public func loadPersonas() -> [Persona] {
         guard let data = try? Data(contentsOf: personasURL),
-              let loaded = try? decoder.decode([Persona].self, from: data),
+              var loaded = try? decoder.decode([Persona].self, from: data),
               !loaded.isEmpty else {
             let defaults = DefaultRoster.personas
             savePersonas(defaults)
             return defaults
+        }
+        // Merge any newly shipped built-in personas (e.g. Task & Build Crew) without overwriting user customizations
+        let existingIDs = Set(loaded.map(\.id))
+        var addedAny = false
+        for builtIn in DefaultRoster.personas where !existingIDs.contains(builtIn.id) {
+            loaded.append(builtIn)
+            addedAny = true
+        }
+        if addedAny {
+            savePersonas(loaded)
         }
         return loaded
     }
@@ -133,11 +143,25 @@ public final class SessionStore: @unchecked Sendable {
 
     public func loadPresets() -> [PanelPreset] {
         guard let data = try? Data(contentsOf: presetsURL),
-              let loaded = try? decoder.decode([PanelPreset].self, from: data),
+              var loaded = try? decoder.decode([PanelPreset].self, from: data),
               !loaded.isEmpty else {
             let defaults = DefaultRoster.presets
             savePresets(defaults)
             return defaults
+        }
+        // Merge any newly shipped built-in panel presets (e.g. Task & Build Crew) right after Core Council
+        let existingIDs = Set(loaded.map(\.id))
+        var addedAny = false
+        for builtIn in DefaultRoster.presets where !existingIDs.contains(builtIn.id) {
+            if builtIn.id == DefaultRoster.taskBuildCrewPresetID, loaded.count >= 1 {
+                loaded.insert(builtIn, at: 1)
+            } else {
+                loaded.append(builtIn)
+            }
+            addedAny = true
+        }
+        if addedAny {
+            savePresets(loaded)
         }
         return loaded
     }

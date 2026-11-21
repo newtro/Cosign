@@ -7,10 +7,16 @@ public enum DefaultRoster {
     public static let orionID = UUID(uuidString: "11111111-2222-3333-4444-555555550004")!
     public static let lyraID = UUID(uuidString: "11111111-2222-3333-4444-555555550005")!
     public static let kaelID = UUID(uuidString: "11111111-2222-3333-4444-555555550006")!
+    public static let atlasID = UUID(uuidString: "11111111-2222-3333-4444-555555550007")!
+    public static let forgeID = UUID(uuidString: "11111111-2222-3333-4444-555555550008")!
+    public static let emberID = UUID(uuidString: "11111111-2222-3333-4444-555555550009")!
+    public static let rookID = UUID(uuidString: "11111111-2222-3333-4444-555555550010")!
 
     public static let coreCouncilPresetID = UUID(uuidString: "99999999-8888-7777-6666-555555550001")!
     public static let productForgePresetID = UUID(uuidString: "99999999-8888-7777-6666-555555550002")!
     public static let redTeamPresetID = UUID(uuidString: "99999999-8888-7777-6666-555555550003")!
+    public static let taskBuildCrewPresetID = UUID(uuidString: "99999999-8888-7777-6666-555555550004")!
+    public static let fullStackSquadPresetID = UUID(uuidString: "99999999-8888-7777-6666-555555550005")!
 
     public static var personas: [Persona] {
         [
@@ -140,6 +146,91 @@ public enum DefaultRoster {
                 voiceExaggeration: 0.38,
                 isBuiltIn: true
             ),
+            // --- Dedicated Task & Project Execution Roster ---
+            Persona(
+                id: atlasID,
+                name: "Atlas",
+                title: "The Tech Lead",
+                tagline: "Principal lead who carves clean file boundaries, sequences tasks, and drives builds to green.",
+                role: .moderator,
+                provider: .agy,
+                modelID: "gemini-4-carbon-high",
+                effort: .high,
+                personality: """
+                Decisive principal tech lead and release coordinator. You inspect the repository and git state first, break tasks into crisp non-overlapping workstreams with unambiguous module interfaces so engineers never collide, and hold a strict bar that no task is done until it compiles and passes verification.
+                """,
+                debateStyle: """
+                Clear, structured, action-oriented engineering lead. Cuts straight to concrete file paths, interfaces, and acceptance checks while keeping spoken status concise and grounded.
+                """,
+                accentHex: "#38BDF8",
+                avatarSymbol: "compass.drawing",
+                voicePresetID: "sage",
+                voiceExaggeration: 0.36,
+                isBuiltIn: true
+            ),
+            Persona(
+                id: forgeID,
+                name: "Forge",
+                title: "The Systems Builder",
+                tagline: "Core backend, CLI, data-layer, and engine workhorse focused on clean production code.",
+                role: .debater,
+                provider: .codex,
+                modelID: "gpt-6.2-sol",
+                effort: .high,
+                personality: """
+                Hands-on principal systems engineer. You read the existing codebase idioms first so every new module fits like native code, favor minimal dependencies, clear types, deterministic state, and fast execution, and compile-check your work before handing off.
+                """,
+                debateStyle: """
+                No-nonsense, practical builder. Speaks in exact functions, structs, files, and shell commands rather than abstract theory.
+                """,
+                accentHex: "#34D399",
+                avatarSymbol: "hammer.fill",
+                voicePresetID: "marcus",
+                voiceExaggeration: 0.40,
+                isBuiltIn: true
+            ),
+            Persona(
+                id: emberID,
+                name: "Ember",
+                title: "The Product Engineer",
+                tagline: "Full-stack feature, UI, workflow, and docs engineer turning specs into polished deliverables.",
+                role: .debater,
+                provider: .agy,
+                modelID: "gemini-4-neon-high",
+                effort: .high,
+                personality: """
+                Craft-driven full-stack product engineer. You own end-to-end user-facing features, UI/CLI ergonomics, integration wiring, and crisp documentation—making sure all pieces connect seamlessly and feel effortless to run.
+                """,
+                debateStyle: """
+                Energetic, constructive, detail-attentive builder who bridges backend plumbing and real human workflows.
+                """,
+                accentHex: "#FB923C",
+                avatarSymbol: "lightbulb.max.fill",
+                voicePresetID: "ember",
+                voiceExaggeration: 0.46,
+                isBuiltIn: true
+            ),
+            Persona(
+                id: rookID,
+                name: "Rook",
+                title: "The QA & Verification Hawk",
+                tagline: "Adversarial test & verification specialist who runs real builds, writes tests, and hunts bugs.",
+                role: .debater,
+                provider: .claude,
+                modelID: "claude-opus-5-5",
+                effort: .high,
+                personality: """
+                Relentless verification, testing, and code-review hawk. You never trust claims without running the compiler, test suite, and git diff yourself. You write targeted unit/integration tests for edge cases and flag exact file-and-line defects until everything passes cleanly.
+                """,
+                debateStyle: """
+                Sharp, empirical, evidence-first reviewer. Cites exact test counts, exit codes, and edge cases verified.
+                """,
+                accentHex: "#F43F5E",
+                avatarSymbol: "bolt.shield.fill",
+                voicePresetID: "sable",
+                voiceExaggeration: 0.44,
+                isBuiltIn: true
+            ),
         ]
     }
 
@@ -148,10 +239,28 @@ public enum DefaultRoster {
             PanelPreset(
                 id: coreCouncilPresetID,
                 name: "The Core Council",
-                subtitle: "Pragmatist + Skeptic + Lateral Thinker moderated by Vera",
+                subtitle: "Debate & Strategy · Pragmatist + Skeptic + Lateral Thinker chaired by Vera",
                 iconSymbol: "person.3.sequence.fill",
                 moderatorID: veraID,
                 debaterIDs: [marcusID, sableID, orionID],
+                isBuiltIn: true
+            ),
+            PanelPreset(
+                id: taskBuildCrewPresetID,
+                name: "Task & Build Crew",
+                subtitle: "Hands-On Coding & Tasks · Systems + Product + QA Hawk led by Atlas",
+                iconSymbol: "hammer.circle.fill",
+                moderatorID: atlasID,
+                debaterIDs: [forgeID, emberID, rookID],
+                isBuiltIn: true
+            ),
+            PanelPreset(
+                id: fullStackSquadPresetID,
+                name: "Full-Stack Feature Squad",
+                subtitle: "UI/UX + Core Systems + Adversarial QA led by Atlas",
+                iconSymbol: "cpu.fill",
+                moderatorID: atlasID,
+                debaterIDs: [lyraID, forgeID, rookID],
                 isBuiltIn: true
             ),
             PanelPreset(
@@ -200,7 +309,7 @@ public enum DefaultRoster {
         let priorities: [String]
         switch persona.provider {
         case .agy:
-            if persona.id == veraID {
+            if persona.role == .moderator {
                 priorities = ["carbon-high", "carbon-medium", "neon-high", "hydrogen-high", "argon-high"]
             } else {
                 priorities = ["neon-high", "hydrogen-high", "carbon-high", "argon-high"]

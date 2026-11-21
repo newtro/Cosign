@@ -45,10 +45,15 @@ struct CosignApp: App {
                 .disabled(!updater.canCheckNow)
             }
             CommandGroup(replacing: .newItem) {
-                Button("New Council Session") {
-                    model.createNewSession()
+                Button("New Council Debate") {
+                    model.createNewSession(forceMode: .debate)
                 }
                 .keyboardShortcut("n", modifiers: [.command])
+
+                Button("New Task / Build Crew Session") {
+                    model.createNewTaskBuildSession()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
 
                 Button("Open Persona Studio…") {
                     model.openStudio()
