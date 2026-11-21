@@ -36,7 +36,7 @@ def main() -> None:
     a = p.parse_args()
 
     sig = re.search(r'sparkle:edSignature="([^"]+)"', a.signature)
-    length = re.search(r'length="(\d+)"', a.signature)
+    length = re.search(r'(?:sparkle:)?length="(\d+)"', a.signature)
     if not sig or not length:
         sys.exit(f"Unexpected sign_update output: {a.signature!r}")
 

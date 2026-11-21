@@ -7,13 +7,14 @@
 # macOS Keychain — zero credentials or private keys are stored in the repository.
 set -euo pipefail
 
-VERSION="${1:?usage: Tools/release.sh <version> [--draft] [--skip-tests]}"
+VERSION="${1:?usage: Tools/release.sh <version> [--draft] [--skip-tests] [--install]}"
 shift
-DRAFT=0; SKIP_TESTS=0
+DRAFT=0; SKIP_TESTS=0; INSTALL_LOCAL=0
 for arg in "$@"; do
   case "$arg" in
     --draft) DRAFT=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
+    --install) INSTALL_LOCAL=1 ;;
     *) echo "Unknown option $arg"; exit 2 ;;
   esac
 done
@@ -114,5 +115,17 @@ if (( ! DRAFT )); then
   git add appcast.xml
   git commit -qm "Release $VERSION"
   git push -q origin main
+fi
+if (( INSTALL_LOCAL )); then
+  step "Installing notarized Cosign $VERSION to /Applications/Cosign.app"
+  INSTALLED="/Applications/Cosign.app"
+  osascript -e 'tell application "Cosign" to quit' 2>/dev/null || pkill -f '^/Applications/Cosign.app/Contents/MacOS/Cosign' 2>/dev/null || true
+  sleep 1
+  rm -rf "${INSTALLED}.installing"
+  ditto "$APP" "${INSTALLED}.installing"
+  rm -rf "$INSTALLED"
+  mv "${INSTALLED}.installing" "$INSTALLED"
+  touch "$INSTALLED"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$INSTALLED"
 fi
 step "Released Cosign $VERSION ($BUILD_NUMBER)$( (( DRAFT )) && echo ' as a draft; appcast.xml not published' )"
