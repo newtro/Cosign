@@ -4,13 +4,17 @@ import CosignCore
 import CryptoKit
 import Foundation
 
-/// Manages the persistent local MLX Chatterbox Turbo daemon, pre-synthesizes queued turns so
-/// transitions between speakers have zero dead air, and publishes live audio meter levels for UI rings.
+/// Two-stage pipelined TTS engine:
+/// 1. `synthesisWorkerTask` holds queued items until Chatterbox Turbo is ready and continuously
+///    pre-synthesizes upcoming turns on Metal GPU *while* the current speaker is talking.
+/// 2. `playbackWorkerTask` plays synthesized `.wav` clips back-to-back in strict FIFO order with
+///    minimal dead air (~70ms breath) between personas.
 @MainActor
-public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
+public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published public private(set) var daemonState: VoiceDaemonState = .idle
     @Published public private(set) var isPlaying: Bool = false
     @Published public private(set) var isPaused: Bool = false
+    @Published public private(set) var isSynthesizingNext: Bool = false
     @Published public var isMuted: Bool = false {
         didSet {
             audioPlayer?.volume = isMuted ? 0 : 1
@@ -27,30 +31,32 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     @Published public private(set) var speakerLevel: CGFloat = 0
 
     private let cacheDirectory: URL
-    private var daemonClient: ChatterboxDaemonClient?
+    private lazy var daemonClient: ChatterboxDaemonClient = ChatterboxDaemonClient { [weak self] newState in
+        Task { @MainActor in
+            self?.daemonState = newState
+        }
+    }
+
+    private var pendingSynthQueue: [SpeechQueueItem] = []
+    private var readyToPlayQueue: [(item: SpeechQueueItem, wavURL: URL?)] = []
+    private var synthesisWorkerTask: Task<Void, Never>?
+    private var playbackWorkerTask: Task<Void, Never>?
+
     private var audioPlayer: AVAudioPlayer?
-    private let fallbackSynth = AVSpeechSynthesizer()
     private var meterTimer: Timer?
-    private var playbackLoopTask: Task<Void, Never>?
-    private var preSynthTasks: [UUID: Task<URL?, Never>] = [:]
     private var currentTurnContinuation: CheckedContinuation<Void, Never>?
 
     public init(cacheRoot: URL = SessionStore.defaultRootDirectory()) {
         self.cacheDirectory = cacheRoot.appendingPathComponent("AudioCache", isDirectory: true)
         super.init()
-        self.fallbackSynth.delegate = self
         try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
     public func warmUpIfNeeded() {
-        guard daemonState == .idle else { return }
-        daemonState = .starting("Starting Chatterbox Turbo (Metal)…")
-        let client = ChatterboxDaemonClient { [weak self] newState in
-            Task { @MainActor in
-                self?.daemonState = newState
-            }
+        if case .idle = daemonState {
+            daemonState = .starting("Starting Chatterbox Turbo (Metal)…")
         }
-        self.daemonClient = client
+        let client = daemonClient
         Task {
             await client.start()
         }
@@ -59,52 +65,54 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     public func shutdown() {
         stopAll()
         let client = daemonClient
-        daemonClient = nil
         Task {
-            await client?.stop()
+            await client.stop()
         }
     }
 
     // MARK: - Queue & Transport Controls
 
+    /// Appends a turn to the continuous TTS pipeline. Holds until Chatterbox can synthesize it,
+    /// and pre-synthesizes ahead in the background while earlier turns are speaking.
     public func enqueue(_ item: SpeechQueueItem) {
+        let trimmed = item.spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
         warmUpIfNeeded()
-        queuedItems.append(item)
-        startPreSynthesis(for: item)
-        ensurePlaybackLoopRunning()
+        pendingSynthQueue.append(item)
+        syncPublishedQueueCount()
+        ensureSynthesisWorkerRunning()
+        ensurePlaybackWorkerRunning()
+    }
+
+    public func enqueueBatch(_ items: [SpeechQueueItem]) {
+        guard !items.isEmpty else { return }
+        warmUpIfNeeded()
+        for item in items where !item.spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pendingSynthQueue.append(item)
+        }
+        syncPublishedQueueCount()
+        ensureSynthesisWorkerRunning()
+        ensurePlaybackWorkerRunning()
     }
 
     public func speakImmediately(_ item: SpeechQueueItem) {
-        stopCurrentOnly()
-        queuedItems.insert(item, at: 0)
-        warmUpIfNeeded()
-        startPreSynthesis(for: item)
-        ensurePlaybackLoopRunning()
+        stopAll()
+        enqueue(item)
     }
 
     public func togglePlayPause() {
-        if let player = audioPlayer {
-            if player.isPlaying {
-                player.pause()
-                isPlaying = false
-                isPaused = true
-            } else {
-                player.enableRate = true
-                player.rate = Float(playbackSpeed)
-                player.play()
-                isPlaying = true
-                isPaused = false
-            }
-        } else if fallbackSynth.isSpeaking {
-            if fallbackSynth.isPaused {
-                fallbackSynth.continueSpeaking()
-                isPlaying = true
-                isPaused = false
-            } else {
-                fallbackSynth.pauseSpeaking(at: .word)
-                isPlaying = false
-                isPaused = true
-            }
+        guard let player = audioPlayer else { return }
+        if player.isPlaying {
+            player.pause()
+            isPlaying = false
+            isPaused = true
+        } else {
+            player.enableRate = true
+            player.rate = Float(playbackSpeed)
+            player.play()
+            isPlaying = true
+            isPaused = false
         }
     }
 
@@ -113,75 +121,102 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     public func stopAll() {
+        pendingSynthQueue.removeAll()
+        readyToPlayQueue.removeAll()
         queuedItems.removeAll()
-        for (_, task) in preSynthTasks {
-            task.cancel()
-        }
-        preSynthTasks.removeAll()
-        playbackLoopTask?.cancel()
-        playbackLoopTask = nil
+        isSynthesizingNext = false
+
+        synthesisWorkerTask?.cancel()
+        synthesisWorkerTask = nil
+        playbackWorkerTask?.cancel()
+        playbackWorkerTask = nil
         stopCurrentOnly()
     }
 
-    // MARK: - Internal Synthesis & Playback
+    private func syncPublishedQueueCount() {
+        queuedItems = readyToPlayQueue.map(\.item) + pendingSynthQueue
+    }
 
-    private func startPreSynthesis(for item: SpeechQueueItem) {
-        guard preSynthTasks[item.id] == nil else { return }
-        let cachedURL = cachedAudioURL(for: item)
-        if FileManager.default.fileExists(atPath: cachedURL.path) {
-            preSynthTasks[item.id] = Task { cachedURL }
-            return
-        }
-        let seedPath = resolveReferenceAudioPath(for: item.persona)
-        let client = daemonClient
-        let exag = item.persona.voiceExaggeration
-        let text = item.spokenText
-        preSynthTasks[item.id] = Task {
-            guard let client else { return nil }
-            let ok = await client.synthesize(
-                text: text,
-                refAudioPath: seedPath,
-                exaggeration: exag,
-                outputURL: cachedURL
-            )
-            return ok ? cachedURL : nil
+    // MARK: - Stage 1: Background Ahead-of-Time Synthesis Worker
+
+    private func ensureSynthesisWorkerRunning() {
+        guard synthesisWorkerTask == nil else { return }
+        synthesisWorkerTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                guard !self.pendingSynthQueue.isEmpty else { break }
+                let item = self.pendingSynthQueue.removeFirst()
+                self.isSynthesizingNext = true
+
+                let wavURL = await self.synthesizeOrFetchCached(for: item)
+                if Task.isCancelled { break }
+
+                self.readyToPlayQueue.append((item: item, wavURL: wavURL))
+                self.isSynthesizingNext = !self.pendingSynthQueue.isEmpty
+                self.syncPublishedQueueCount()
+                self.ensurePlaybackWorkerRunning()
+            }
+            self.isSynthesizingNext = false
+            self.synthesisWorkerTask = nil
         }
     }
 
-    private func ensurePlaybackLoopRunning() {
-        guard playbackLoopTask == nil else { return }
-        playbackLoopTask = Task { [weak self] in
+    private func synthesizeOrFetchCached(for item: SpeechQueueItem) async -> URL? {
+        let cachedURL = cachedAudioURL(for: item)
+        if FileManager.default.fileExists(atPath: cachedURL.path),
+           ((try? FileManager.default.attributesOfItem(atPath: cachedURL.path)[.size] as? Int) ?? 0) > 1024 {
+            return cachedURL
+        }
+        let seedPath = resolveReferenceAudioPath(for: item.persona)
+        let client = daemonClient
+        let ok = await client.synthesize(
+            text: item.spokenText,
+            refAudioPath: seedPath,
+            exaggeration: item.persona.voiceExaggeration,
+            outputURL: cachedURL
+        )
+        if ok, FileManager.default.fileExists(atPath: cachedURL.path) {
+            return cachedURL
+        }
+        return nil
+    }
+
+    // MARK: - Stage 2: Continuous Gapless Audio Playback Worker
+
+    private func ensurePlaybackWorkerRunning() {
+        guard playbackWorkerTask == nil else { return }
+        playbackWorkerTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                guard !self.queuedItems.isEmpty else { break }
-                let next = self.queuedItems.removeFirst()
-                // Kick off pre-synthesis for the next 2 items in queue while we play this one
-                for upcoming in self.queuedItems.prefix(2) {
-                    self.startPreSynthesis(for: upcoming)
+                if self.readyToPlayQueue.isEmpty {
+                    // If synthesis is still working on upcoming queued turns, hold and wait seamlessly!
+                    if !self.pendingSynthQueue.isEmpty || self.isSynthesizingNext || self.synthesisWorkerTask != nil {
+                        try? await Task.sleep(nanoseconds: 60_000_000)
+                        continue
+                    } else {
+                        break
+                    }
                 }
 
-                self.activeItem = next
-                let synthTask = self.preSynthTasks[next.id]
-                let wavURL = await synthTask?.value
-                self.preSynthTasks.removeValue(forKey: next.id)
+                let nextPair = self.readyToPlayQueue.removeFirst()
+                self.syncPublishedQueueCount()
+                self.activeItem = nextPair.item
+
+                if let wavURL = nextPair.wavURL, FileManager.default.fileExists(atPath: wavURL.path) {
+                    await self.playWAV(url: wavURL)
+                }
 
                 if Task.isCancelled { break }
-
-                if let wavURL, FileManager.default.fileExists(atPath: wavURL.path) {
-                    await self.playWAV(url: wavURL)
-                } else {
-                    await self.playSystemFallback(text: ExpressiveTagFormatter.stripTags(next.spokenText))
-                }
-
                 self.activeItem = nil
                 self.speakerLevel = 0
-                try? await Task.sleep(nanoseconds: 220_000_000) // natural breath between turns
+                // Minimal 70ms breath between speakers so voices flow continuously like a live roundtable
+                try? await Task.sleep(nanoseconds: 70_000_000)
             }
             self.activeItem = nil
             self.isPlaying = false
             self.isPaused = false
             self.speakerLevel = 0
-            self.playbackLoopTask = nil
+            self.playbackWorkerTask = nil
         }
     }
 
@@ -210,34 +245,16 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
             self.audioPlayer = nil
             self.isPlaying = false
         } catch {
-            await playSystemFallback(text: activeItem.map { ExpressiveTagFormatter.stripTags($0.spokenText) } ?? "")
+            stopMetering()
+            self.audioPlayer = nil
+            self.isPlaying = false
         }
-    }
-
-    private func playSystemFallback(text: String) async {
-        guard !text.isEmpty, !isMuted else { return }
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = Float(0.49 * playbackSpeed)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-        self.isPlaying = true
-        self.isPaused = false
-        startSimulatedMetering()
-
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            self.currentTurnContinuation = cont
-            self.fallbackSynth.speak(utterance)
-        }
-        stopMetering()
-        self.isPlaying = false
     }
 
     private func stopCurrentOnly() {
         stopMetering()
         audioPlayer?.stop()
         audioPlayer = nil
-        if fallbackSynth.isSpeaking {
-            fallbackSynth.stopSpeaking(at: .immediate)
-        }
         isPlaying = false
         isPaused = false
         speakerLevel = 0
@@ -253,21 +270,19 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
         stopMetering()
         meterTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, let player = self.audioPlayer, player.isPlaying else { return }
-                player.updateMeters()
-                let power = player.averagePower(forChannel: 0) // -160 ... 0 dB
-                let normalized = max(0, min(1, (power + 45) / 42))
-                self.speakerLevel = CGFloat(normalized)
-            }
-        }
-    }
-
-    private func startSimulatedMetering() {
-        stopMetering()
-        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.isPlaying else { return }
-                self.speakerLevel = CGFloat.random(in: 0.25...0.85)
+                guard let self, let player = self.audioPlayer else { return }
+                if player.isPlaying {
+                    player.updateMeters()
+                    let power = player.averagePower(forChannel: 0)
+                    let normalized = max(0, min(1, (power + 45) / 42))
+                    self.speakerLevel = CGFloat(normalized)
+                } else if !self.isPaused {
+                    // Safety net in case AVAudioPlayer finishes without firing delegate
+                    if let cont = self.currentTurnContinuation {
+                        self.currentTurnContinuation = nil
+                        cont.resume()
+                    }
+                }
             }
         }
     }
@@ -278,15 +293,6 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     nonisolated public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        Task { @MainActor in
-            if let cont = self.currentTurnContinuation {
-                self.currentTurnContinuation = nil
-                cont.resume()
-            }
-        }
-    }
-
-    nonisolated public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor in
             if let cont = self.currentTurnContinuation {
                 self.currentTurnContinuation = nil
@@ -320,7 +326,7 @@ public final class VoiceEngine: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 }
 
-// MARK: - Background Actor Managing Python MLX Daemon
+// MARK: - Background Actor Managing Python MLX Daemon (Zero Pipe Deadlock + Auto-Recovery)
 
 actor ChatterboxDaemonClient {
     private let onStateChange: @Sendable (VoiceDaemonState) -> Void
@@ -329,29 +335,31 @@ actor ChatterboxDaemonClient {
     private var pending: [String: CheckedContinuation<Bool, Never>] = [:]
     private var isReady: Bool = false
     private var readyWaiters: [CheckedContinuation<Bool, Never>] = []
-    private var failedPermanently: Bool = false
+    private var missingRuntimePermanently: Bool = false
 
     init(onStateChange: @escaping @Sendable (VoiceDaemonState) -> Void) {
         self.onStateChange = onStateChange
     }
 
     func start() async {
-        guard process == nil, !failedPermanently else { return }
+        if let process, process.isRunning { return }
+        guard !missingRuntimePermanently else { return }
 
         guard let scriptURL = Bundle.module.url(forResource: "voice_daemon", withExtension: "py") else {
-            failedPermanently = true
-            onStateChange(.fallbackSystemVoice("Voice daemon script missing; using macOS voice"))
+            missingRuntimePermanently = true
+            onStateChange(.fallbackSystemVoice("Voice daemon script missing"))
             resumeReadyWaiters(false)
             return
         }
 
-        let uvBinary = BinaryLocator.findBinary("uv")
-        guard let uvBinary else {
-            failedPermanently = true
-            onStateChange(.fallbackSystemVoice("Install `uv` to enable Chatterbox Turbo MLX; using macOS voice"))
+        guard let uvBinary = BinaryLocator.findBinary("uv") else {
+            missingRuntimePermanently = true
+            onStateChange(.fallbackSystemVoice("Install `uv` to enable Chatterbox Turbo MLX"))
             resumeReadyWaiters(false)
             return
         }
+
+        onStateChange(.starting("Warming up Chatterbox Turbo (Metal)…"))
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: uvBinary)
@@ -368,6 +376,8 @@ actor ChatterboxDaemonClient {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = BinaryLocator.augmentedPATH()
         env["PYTHONUNBUFFERED"] = "1"
+        env["TQDM_DISABLE"] = "1"
+        env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         proc.environment = env
 
         let inPipe = Pipe()
@@ -379,8 +389,14 @@ actor ChatterboxDaemonClient {
 
         self.process = proc
         self.stdinHandle = inPipe.fileHandleForWriting
+        self.isReady = false
 
         let lineBuffer = LockedBox(Data())
+
+        // CRITICAL: Drain stderr continuously so Python/MLX/transformers can NEVER block on a full 64KB stderr pipe!
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
 
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
@@ -406,6 +422,7 @@ actor ChatterboxDaemonClient {
 
         proc.terminationHandler = { [weak self] _ in
             outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
             Task {
                 await self?.handleDaemonTerminated()
             }
@@ -414,8 +431,9 @@ actor ChatterboxDaemonClient {
         do {
             try proc.run()
         } catch {
-            failedPermanently = true
-            onStateChange(.fallbackSystemVoice("Voice daemon launch failed; using macOS voice"))
+            process = nil
+            stdinHandle = nil
+            onStateChange(.fallbackSystemVoice("Voice daemon launch error"))
             resumeReadyWaiters(false)
         }
     }
@@ -429,11 +447,25 @@ actor ChatterboxDaemonClient {
         }
         process = nil
         stdinHandle = nil
+        isReady = false
     }
 
     func synthesize(text: String, refAudioPath: String?, exaggeration: Double, outputURL: URL) async -> Bool {
-        if failedPermanently { return false }
-        if !isReady {
+        if missingRuntimePermanently { return false }
+        for attempt in 0..<2 {
+            if await synthesizeSingleAttempt(text: text, refAudioPath: refAudioPath, exaggeration: exaggeration, outputURL: outputURL) {
+                return true
+            }
+            if attempt == 0 {
+                // Restart daemon cleanly on transient failure and retry once
+                stop()
+            }
+        }
+        return false
+    }
+
+    private func synthesizeSingleAttempt(text: String, refAudioPath: String?, exaggeration: Double, outputURL: URL) async -> Bool {
+        if !isReady || process?.isRunning != true {
             await start()
             let becameReady = await waitForReady()
             guard becameReady else { return false }
@@ -470,7 +502,7 @@ actor ChatterboxDaemonClient {
 
     private func waitForReady() async -> Bool {
         if isReady { return true }
-        if failedPermanently { return false }
+        if missingRuntimePermanently { return false }
         return await withCheckedContinuation { cont in
             readyWaiters.append(cont)
         }
@@ -500,8 +532,7 @@ actor ChatterboxDaemonClient {
             } else if state == "starting" {
                 onStateChange(.starting(msg))
             } else if state == "error" {
-                failedPermanently = true
-                onStateChange(.fallbackSystemVoice("Chatterbox unavailable; using macOS voice"))
+                onStateChange(.fallbackSystemVoice("Chatterbox reload needed"))
                 resumeReadyWaiters(false)
             }
         } else if event == "done" {
@@ -522,9 +553,6 @@ actor ChatterboxDaemonClient {
         pending.removeAll()
         for (_, cont) in allPending {
             cont.resume(returning: false)
-        }
-        if !failedPermanently {
-            onStateChange(.fallbackSystemVoice("Voice engine restarted on next turn"))
         }
     }
 }

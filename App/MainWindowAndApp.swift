@@ -115,9 +115,13 @@ struct CosignRootView: View {
                                     .frame(maxWidth: .infinity)
                                 }
                                 .onChange(of: session.entries.count) { _, _ in
-                                    if let lastID = session.entries.last?.id {
+                                    if let lastEntry = session.entries.last {
+                                        let isVerdict: Bool = {
+                                            if case .verdict = lastEntry { return true }
+                                            return false
+                                        }()
                                         withAnimation(.easeOut(duration: 0.28)) {
-                                            proxy.scrollTo(lastID, anchor: .bottom)
+                                            proxy.scrollTo(lastEntry.id, anchor: isVerdict ? .top : .bottom)
                                         }
                                     }
                                 }

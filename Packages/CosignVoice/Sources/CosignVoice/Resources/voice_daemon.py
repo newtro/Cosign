@@ -7,7 +7,6 @@ All generation runs 100% locally on Metal GPU with zero cloud API calls.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import pathlib
@@ -15,15 +14,36 @@ import sys
 import time
 import traceback
 
+# Disable tqdm / HuggingFace progress bars so stderr/stdout pipes never saturate or block.
+os.environ["TQDM_DISABLE"] = "1"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
 MODEL_REPO = os.environ.get("COSIGN_TTS_MODEL", "mlx-community/chatterbox-turbo-fp16")
 _PROTO_OUT = sys.stdout
-# Keep library print() chatter on stderr so stdout carries strictly JSON protocol lines.
-sys.stdout = sys.stderr
+_DEVNULL = open(os.devnull, "w")
+sys.stdout = _DEVNULL
 
 
 def emit(payload: dict) -> None:
     _PROTO_OUT.write(json.dumps(payload, ensure_ascii=False) + "\n")
     _PROTO_OUT.flush()
+
+
+def trim_dead_air(audio, sample_rate: int):
+    """Trims leading and trailing dead silence so speaker-to-speaker transitions have minimal pause."""
+    import numpy as np
+
+    if audio.size == 0:
+        return audio
+    abs_audio = np.abs(audio)
+    active = np.where(abs_audio > 0.009)[0]
+    if active.size == 0:
+        return audio
+    pad = int(sample_rate * 0.045)  # keep a natural 45ms breath at edges
+    start = max(0, int(active[0]) - pad)
+    end = min(len(audio), int(active[-1]) + pad)
+    return audio[start:end]
 
 
 def main() -> None:
@@ -90,6 +110,7 @@ def main() -> None:
             kwargs = {
                 "text": text,
                 "temperature": round(temp, 2),
+                "max_tokens": 1200,
             }
             if ref_audio and pathlib.Path(ref_audio).exists():
                 kwargs["ref_audio"] = str(ref_audio)
@@ -108,10 +129,10 @@ def main() -> None:
                 emit({"event": "done", "id": req_id, "ok": False, "error": "Model produced empty audio"})
                 continue
 
-            audio = np.concatenate(chunks)
+            audio = trim_dead_air(np.concatenate(chunks), sample_rate)
             peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-            if peak > 0.98:
-                audio = audio * (0.95 / peak)
+            if peak > 0.01:
+                audio = audio * (0.92 / max(peak, 0.92))
 
             out_file = pathlib.Path(out_path)
             out_file.parent.mkdir(parents=True, exist_ok=True)

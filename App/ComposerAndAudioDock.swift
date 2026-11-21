@@ -386,16 +386,24 @@ private struct AudioTransportRibbon: View {
                 if let active = voice.activeItem {
                     if voice.isPlaying {
                         LiveEqualizerBars(level: voice.speakerLevel, color: activeAccent, barCount: 5, maxHeight: 13)
+                    } else {
+                        ProgressView().controlSize(.mini).tint(activeAccent)
                     }
-                    Text(active.contextLabel)
+                    Text(voice.isPlaying ? active.contextLabel : "Voicing \(active.contextLabel)…")
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(StudioTheme.inkPrimary)
                         .lineLimit(1)
                     if !voice.queuedItems.isEmpty {
-                        Text("+\(voice.queuedItems.count) queued")
+                        Text(voice.isSynthesizingNext ? "· buffering +\(voice.queuedItems.count)" : "· +\(voice.queuedItems.count) ready")
                             .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(StudioTheme.inkMuted)
+                            .foregroundStyle(voice.isSynthesizingNext ? StudioTheme.brassBright : StudioTheme.emerald)
                     }
+                } else if voice.isSynthesizingNext || !voice.queuedItems.isEmpty {
+                    ProgressView().controlSize(.mini).tint(StudioTheme.brassBright)
+                    Text("Queuing & synthesizing voices (\(voice.queuedItems.count) turns)…")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(StudioTheme.brassBright)
+                        .lineLimit(1)
                 } else {
                     Text(statusDescription(voice.daemonState))
                         .font(.system(size: 11, weight: .medium))
@@ -405,6 +413,33 @@ private struct AudioTransportRibbon: View {
             }
 
             Spacer()
+
+            // Play Entire Session Button when idle on a session with turns
+            if voice.activeItem == nil && voice.queuedItems.isEmpty,
+               let current = model.currentSession,
+               current.entries.contains(where: {
+                   if case .turn = $0 { return true }
+                   if case .verdict = $0 { return true }
+                   return false
+               }) {
+                Button {
+                    model.playFullSessionAudio(current)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 9.5, weight: .bold))
+                        Text("Play Full Debate")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(StudioTheme.brassBright)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(StudioTheme.brass.opacity(0.14)))
+                    .overlay(Capsule().strokeBorder(StudioTheme.brass.opacity(0.32), lineWidth: 0.8))
+                }
+                .buttonStyle(.plain)
+                .help("Voice every turn and the verdict continuously from start to finish")
+            }
 
             // Playback Transport Controls
             if voice.activeItem != nil || !voice.queuedItems.isEmpty {

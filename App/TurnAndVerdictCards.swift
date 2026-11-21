@@ -613,12 +613,14 @@ struct CosignVerdictCardView: View {
     let verdict: CosignVerdict
 
     @State private var copied: Bool = false
+    @State private var showFullBrief: Bool = false
+    @State private var showDissents: Bool = false
     @State private var showChairTrace: Bool = false
 
     var body: some View {
         let isSpeakingNow = model.voiceEngine.activeItem?.id == verdict.id && model.voiceEngine.isPlaying
 
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
             // Top Emblem & Actions
             HStack(alignment: .center, spacing: 12) {
                 HStack(spacing: 8) {
@@ -639,7 +641,7 @@ struct CosignVerdictCardView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("CO-SIGNED COUNCIL VERDICT")
+                        Text("CO-SIGNED COUNCIL ANSWER")
                             .font(.system(size: 10, weight: .heavy, design: .rounded))
                             .tracking(1.1)
                             .foregroundStyle(StudioTheme.brassBright)
@@ -707,24 +709,35 @@ struct CosignVerdictCardView: View {
 
             // Editorial Headline
             Text(verdict.headline)
-                .font(.system(size: 21, weight: .bold, design: .serif))
+                .font(.system(size: 22, weight: .bold, design: .serif))
                 .foregroundStyle(StudioTheme.inkPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // Main Recommendation Body (renders inline Markdown like **bold** & `code`)
-            Group {
-                if let md = try? AttributedString(markdown: verdict.recommendation, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-                    Text(md)
-                } else {
-                    Text(verdict.recommendation)
-                }
-            }
-            .font(.system(size: 14.5))
-            .lineSpacing(5)
-            .foregroundStyle(StudioTheme.inkPrimary.opacity(0.94))
-            .textSelection(.enabled)
+            // Front-and-Center Bottom-Line Answer (Compact & Unmistakable!)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("THE BOTTOM LINE")
+                    .font(.system(size: 9.5, weight: .heavy, design: .rounded))
+                    .tracking(0.9)
+                    .foregroundStyle(StudioTheme.emerald)
 
-            // Concrete Action Plan
+                ExpressiveSpokenTextView(
+                    rawText: verdict.spokenVerdict,
+                    accent: StudioTheme.brassBright,
+                    showCues: model.preferences.showVocalTagsInText
+                )
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(StudioTheme.emerald.opacity(0.07))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(StudioTheme.emerald.opacity(0.26), lineWidth: 1)
+                    )
+            )
+
+            // Compact Action Plan
             if !verdict.actionSteps.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("RECOMMENDED NEXT STEPS")
@@ -740,7 +753,8 @@ struct CosignVerdictCardView: View {
                                 .frame(width: 20, height: 20)
                                 .background(Circle().fill(StudioTheme.brass.opacity(0.16)))
                             Text(step)
-                                .font(.system(size: 13.5, weight: .medium))
+                                .font(.system(size: 13, weight: .medium))
+                                .lineSpacing(2.5)
                                 .foregroundStyle(StudioTheme.inkPrimary)
                                 .textSelection(.enabled)
                         }
@@ -754,48 +768,26 @@ struct CosignVerdictCardView: View {
                 )
             }
 
-            // Key Trade-offs
-            if !verdict.keyTradeoffs.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("KEY TRADE-OFFS")
-                        .font(.system(size: 10, weight: .heavy, design: .rounded))
-                        .tracking(0.9)
-                        .foregroundStyle(StudioTheme.inkMuted)
-
-                    ForEach(Array(verdict.keyTradeoffs.enumerated()), id: \.offset) { _, item in
-                        HStack(alignment: .top, spacing: 7) {
-                            Image(systemName: "arrow.left.and.right")
-                                .font(.system(size: 10))
-                                .foregroundStyle(StudioTheme.inkMuted)
-                                .padding(.top, 4)
-                            Text(item)
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(StudioTheme.inkSecondary)
-                        }
-                    }
-                }
-            }
-
-            // Co-Signatory Seals
+            // Co-Signatory Seals Row
             if !verdict.cosignedNames.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("CO-SIGNED BY")
+                HStack(spacing: 8) {
+                    Text("CO-SIGNED BY:")
                         .font(.system(size: 9.5, weight: .heavy, design: .rounded))
                         .tracking(0.9)
                         .foregroundStyle(StudioTheme.emerald)
 
-                    FlowLayout(spacing: 8, lineSpacing: 8) {
+                    FlowLayout(spacing: 7, lineSpacing: 7) {
                         ForEach(verdict.cosignedNames, id: \.self) { signer in
-                            HStack(spacing: 6) {
+                            HStack(spacing: 5) {
                                 Image(systemName: "checkmark.seal.fill")
-                                    .font(.system(size: 11.5))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(StudioTheme.emerald)
                                 Text(signer)
-                                    .font(.system(size: 12.5, weight: .bold, design: .serif))
+                                    .font(.system(size: 12, weight: .bold, design: .serif))
                                     .foregroundStyle(StudioTheme.inkPrimary)
                             }
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4.5)
                             .background(
                                 Capsule()
                                     .fill(StudioTheme.emerald.opacity(0.11))
@@ -806,78 +798,133 @@ struct CosignVerdictCardView: View {
                 }
             }
 
-            // Minority Dissent Report (if any debater refused to fold!)
-            if !verdict.dissents.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(StudioTheme.crimson)
-                        Text("MINORITY DISSENT")
-                            .font(.system(size: 10, weight: .heavy, design: .rounded))
-                            .tracking(0.9)
-                            .foregroundStyle(StudioTheme.crimson)
+            // Progressive-Disclosure Drawers (Full Written Brief, Minority Dissent, & Synthesis Notes)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    if !verdict.recommendation.isEmpty {
+                        Button {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                showFullBrief.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "doc.text.fill")
+                                    .font(.system(size: 10.5))
+                                Text(showFullBrief ? "Hide Full Brief" : "Full Written Brief & Trade-offs")
+                                Image(systemName: showFullBrief ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                        }
+                        .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.brassBright, active: showFullBrief))
                     }
 
-                    ForEach(verdict.dissents) { dissent in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(dissent.personaName)
-                                .font(.system(size: 12.5, weight: .bold, design: .serif))
-                                .foregroundStyle(Color(hex: dissent.accentHex))
-                            Text(dissent.coreObjection)
-                                .font(.system(size: 13))
-                                .foregroundStyle(StudioTheme.inkPrimary.opacity(0.9))
-                                .textSelection(.enabled)
+                    if !verdict.dissents.isEmpty {
+                        Button {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                showDissents.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10.5))
+                                Text("\(verdict.dissents.count) Minority Caveat (\(verdict.dissents.map(\.personaName).joined(separator: ", ")))")
+                                Image(systemName: showDissents ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
                         }
+                        .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.crimson, active: showDissents))
+                    }
+
+                    if !verdict.moderatorThoughtProcess.isEmpty {
+                        Button {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                showChairTrace.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "scale.3d")
+                                    .font(.system(size: 10.5))
+                                Text("Synthesis Notes")
+                                Image(systemName: showChairTrace ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                        }
+                        .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: showChairTrace))
                     }
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(StudioTheme.crimson.opacity(0.08))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(StudioTheme.crimson.opacity(0.30), lineWidth: 1)
-                        )
-                )
-            }
 
-            // Chair's Synthesis Trace Drawer
-            if !verdict.moderatorThoughtProcess.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Button {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                            showChairTrace.toggle()
+                if showFullBrief {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Group {
+                            if let md = try? AttributedString(markdown: verdict.recommendation, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                                Text(md)
+                            } else {
+                                Text(verdict.recommendation)
+                            }
                         }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "scale.3d")
-                                .font(.system(size: 11))
-                                .foregroundStyle(StudioTheme.brassBright)
-                            Text(showChairTrace ? "Hide Synthesis Reasoning" : "Inspect How \(verdict.moderatorName) Weighed the Debate")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(StudioTheme.inkSecondary)
-                            Spacer()
-                            Image(systemName: showChairTrace ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 13.5))
+                        .lineSpacing(4.5)
+                        .foregroundStyle(StudioTheme.inkPrimary.opacity(0.93))
+                        .textSelection(.enabled)
+
+                        if !verdict.keyTradeoffs.isEmpty {
+                            Divider().overlay(Color.white.opacity(0.07))
+                            Text("KEY TRADE-OFFS")
+                                .font(.system(size: 9.5, weight: .heavy, design: .rounded))
+                                .tracking(0.8)
                                 .foregroundStyle(StudioTheme.inkMuted)
+                            ForEach(Array(verdict.keyTradeoffs.enumerated()), id: \.offset) { _, item in
+                                HStack(alignment: .top, spacing: 7) {
+                                    Image(systemName: "arrow.left.and.right")
+                                        .font(.system(size: 9.5))
+                                        .foregroundStyle(StudioTheme.inkMuted)
+                                        .padding(.top, 4)
+                                    Text(item)
+                                        .font(.system(size: 12.5))
+                                        .foregroundStyle(StudioTheme.inkSecondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
                         }
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.04)))
                     }
-                    .buttonStyle(.plain)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(StudioTheme.drawerBg))
+                }
 
-                    if showChairTrace {
-                        Text(verdict.moderatorThoughtProcess)
-                            .font(.system(size: 12.5))
-                            .lineSpacing(4)
-                            .foregroundStyle(StudioTheme.inkSecondary)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(StudioTheme.drawerBg))
+                if showDissents {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(verdict.dissents) { dissent in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(dissent.personaName)'s Caveat / Dissent")
+                                    .font(.system(size: 12.5, weight: .bold, design: .serif))
+                                    .foregroundStyle(Color(hex: dissent.accentHex))
+                                Text(dissent.coreObjection)
+                                    .font(.system(size: 12.5))
+                                    .lineSpacing(3.5)
+                                    .foregroundStyle(StudioTheme.inkPrimary.opacity(0.9))
+                                    .textSelection(.enabled)
+                            }
+                        }
                     }
+                    .padding(13)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(StudioTheme.crimson.opacity(0.08))
+                            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(StudioTheme.crimson.opacity(0.28), lineWidth: 1))
+                    )
+                }
+
+                if showChairTrace {
+                    Text(verdict.moderatorThoughtProcess)
+                        .font(.system(size: 12.5))
+                        .lineSpacing(4)
+                        .foregroundStyle(StudioTheme.inkSecondary)
+                        .textSelection(.enabled)
+                        .padding(13)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(StudioTheme.drawerBg))
                 }
             }
         }

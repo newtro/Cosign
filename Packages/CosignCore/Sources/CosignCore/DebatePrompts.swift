@@ -40,9 +40,9 @@ public enum JSONExtractor {
 public enum DebatePrompts {
     public static let expressiveVoiceGuidance = """
     VOICE & EXPRESSIVENESS RULES FOR SPOKEN TEXT:
-    - Your `spoken_take` (or `spoken_intro` / `spoken_verdict`) will be read aloud by an expressive neural voice engine (Chatterbox Turbo).
-    - Write like a sharp, spirited human speaking live around a studio table—address fellow panelists by first name, use contractions, rhythm, and zero markdown bullets or asterisks inside spoken fields.
-    - Keep `spoken_take` compact: strictly 2 to 4 punchy sentences (roughly 35 to 65 words) so the user never faces a wall of text.
+    - Your `spoken_take` (or `spoken_intro` / `spoken_verdict`) will be read aloud continuously back-to-back with the other personas by an expressive neural voice engine (Chatterbox Turbo).
+    - Write like a sharp, spirited human speaking live around a studio table—address fellow panelists by first name, use natural conversational flow, contractions, rhythm, and zero markdown bullets or asterisks inside spoken fields.
+    - Give a satisfying, substantive spoken turn: 3 to 6 flowing sentences (roughly 65 to 115 words) that carry your full point aloud clearly while keeping exhaustive file lists and deep notes in `supporting_notes`.
     - When genuinely fitting your reaction, you may drop at most ONE natural inline vocal tag from this exact set: `[chuckle]`, `[laugh]`, `[sigh]`, `[clear throat]`, `[cough]`.
     """
 

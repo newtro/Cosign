@@ -87,11 +87,11 @@ final class AppModel: ObservableObject {
         }
 
         if !testing {
+            if loadedPrefs.autoSpeakResponses {
+                voiceEngine.warmUpIfNeeded()
+            }
             Task {
                 await refreshModels()
-                if preferences.autoSpeakResponses {
-                    voiceEngine.warmUpIfNeeded()
-                }
             }
         }
     }
@@ -550,6 +550,35 @@ final class AppModel: ObservableObject {
             spokenText: verdict.spokenVerdict,
             contextLabel: "Verdict · \(mod.name)"
         ))
+    }
+
+    func playFullSessionAudio(_ session: DebateSession) {
+        voiceEngine.stopAll()
+        voiceEngine.isMuted = false
+        var batch: [SpeechQueueItem] = []
+        for entry in session.entries {
+            switch entry {
+            case .turn(let t):
+                let speaker = persona(for: t.personaID) ?? DefaultRoster.personas[0]
+                batch.append(SpeechQueueItem(
+                    id: t.id,
+                    persona: speaker,
+                    spokenText: t.spokenTake,
+                    contextLabel: "\(t.roundLabel) · \(speaker.name)"
+                ))
+            case .verdict(let v):
+                let mod = persona(for: v.moderatorID) ?? DefaultRoster.personas[0]
+                batch.append(SpeechQueueItem(
+                    id: v.id,
+                    persona: mod,
+                    spokenText: v.spokenVerdict,
+                    contextLabel: "Verdict · \(mod.name)"
+                ))
+            default:
+                break
+            }
+        }
+        voiceEngine.enqueueBatch(batch)
     }
 
     func previewPersonaVoice(_ persona: Persona) {
