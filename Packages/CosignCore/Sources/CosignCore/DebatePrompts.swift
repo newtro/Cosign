@@ -101,7 +101,7 @@ public enum DebatePrompts {
           "session_title": "Short 3-6 word title",
           "needs_interview": true,
           "spoken_intro": "1-2 lively spoken sentences introducing the quick questions (or empty string)",
-          "thought_process": "What you checked and what's still missing",
+          "supporting_notes": "What context you checked and why these questions matter",
           "questions": [
             {
               "asked_by": "Exact debater name",
@@ -137,7 +137,7 @@ public enum DebatePrompts {
         {
           "stance": "opening",
           "spoken_take": "2-4 punchy, spirited spoken sentences stating your core position.",
-          "thought_process": "Your full analytical breakdown, codebase findings, and deeper reasoning.",
+          "supporting_notes": "2-3 concise paragraphs of supporting evidence, codebase citations, and trade-offs.",
           "key_points": ["Crisp point 1", "Crisp point 2", "Crisp point 3"],
           "tools_used": "Short summary of files/repos/commands inspected, or empty string"
         }
@@ -163,7 +163,7 @@ public enum DebatePrompts {
         {
           "stance": "moderating",
           "spoken_take": "1-3 lively spoken sentences calling out the tension between specific panelists by name and handing them the floor.",
-          "thought_process": "Why this fault line is the decisive question for the room.",
+          "supporting_notes": "Brief note on why this fault line is the decisive question for the room.",
           "key_points": ["Fault line 1", "Question on the floor"]
         }
         """
@@ -203,7 +203,7 @@ public enum DebatePrompts {
           "target_persona": "Peer First Name",
           "spoken_take": "2-4 spirited spoken sentences talking directly to your fellow panelists.",
           "direct_question_for_peer": "Optional 1-sentence pointed question for target_persona, or empty string",
-          "thought_process": "Detailed reasoning and any repo/file evidence checked.",
+          "supporting_notes": "Supporting critique, counter-arguments, and any repo/file evidence checked.",
           "key_points": ["Key point 1", "Key point 2"],
           "tools_used": "Short summary of files/commands checked, or empty string"
         }
@@ -237,7 +237,7 @@ public enum DebatePrompts {
           "stance": "replying",
           "target_persona": "\(challengerName)",
           "spoken_take": "2-3 punchy spoken sentences answering \(challengerName) directly.",
-          "thought_process": "Your technical reasoning or concession.",
+          "supporting_notes": "Supporting technical details or concession notes.",
           "key_points": ["Direct answer"],
           "tools_used": "Files/commands checked, or empty string"
         }
@@ -285,7 +285,7 @@ public enum DebatePrompts {
               "target_scope": "Files or folder scope"
             }
           ],
-          "thought_process": "How you weighed the debate and structured any assignments."
+          "supporting_notes": "Summary of how the panel's arguments were weighed and synthesized."
         }
         """
     }
@@ -315,7 +315,7 @@ public enum DebatePrompts {
           "stance": "executing",
           "target_persona": "\(moderatorName)",
           "spoken_take": "2-3 crisp spoken sentences reporting what you changed and verified.",
-          "thought_process": "Summary of edits made, why, and verification output.",
+          "supporting_notes": "Summary of edits made and verification output.",
           "key_points": ["File/change 1", "Verification result"],
           "tools_used": "Exact files edited and commands run"
         }
@@ -346,7 +346,7 @@ public enum DebatePrompts {
           "stance": "followup",
           "target_persona": "",
           "spoken_take": "2-4 punchy spoken sentences answering the follow-up.",
-          "thought_process": "Your deeper analysis and details.",
+          "supporting_notes": "Supporting details and references.",
           "key_points": ["Takeaway 1", "Takeaway 2"],
           "tools_used": "Files inspected/edited or empty string"
         }

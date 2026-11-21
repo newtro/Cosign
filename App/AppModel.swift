@@ -380,6 +380,45 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func resumeCurrentSession() {
+        guard let session = currentSession, !session.stage.isBusy else { return }
+        lastErrorBanner = nil
+        voiceEngine.stopAll()
+
+        let moderator = activeModerator(for: session)
+        let debaters = activeDebaters(for: session)
+        let labels = allModelLabelsByID
+        let orKey = KeychainHelper.read(account: "openrouter")
+
+        activeRunTask?.cancel()
+        activeRunTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let finalSession = try await self.orchestrator.resumeInterruptedDebate(
+                    into: session,
+                    moderator: moderator,
+                    debaters: debaters,
+                    modelLabels: labels,
+                    openRouterKey: orKey
+                ) { [weak self] event in
+                    await self?.handleOrchestratorEvent(event)
+                }
+                self.updateSessionInPlace(finalSession)
+                self.activeThinkerIDs = []
+            } catch is CancellationError {
+                self.markSessionStopped(session.id)
+            } catch let err as ModelRunnerError {
+                if case .cancelled = err {
+                    self.markSessionStopped(session.id)
+                } else {
+                    self.recordError(err.localizedDescription, on: session.id)
+                }
+            } catch {
+                self.recordError(error.localizedDescription, on: session.id)
+            }
+        }
+    }
+
     func executeVerdict(_ verdict: CosignVerdict) {
         guard let session = currentSession, !session.stage.isBusy else { return }
         lastErrorBanner = nil

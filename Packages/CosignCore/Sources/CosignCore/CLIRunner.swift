@@ -141,17 +141,39 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
     // MARK: - Claude Subscription CLI
 
     private func callClaude(_ req: ModelCallRequest) async throws -> String {
+        do {
+            return try await callClaudeOnce(req, modelOverride: nil)
+        } catch let ModelRunnerError.processFailed(msg) where Self.isClaudeFalsePositiveModelBlock(msg, modelID: req.modelID) {
+            // Anthropic's Opus 5.5 occasionally false-positives on `[reasoning_extraction]` with safe prompts
+            // and recommends switching models. Automatically fall back to `claude-sonnet-5-5` so the seat never stalls!
+            return try await callClaudeOnce(req, modelOverride: "claude-sonnet-5-5")
+        }
+    }
+
+    private static func isClaudeFalsePositiveModelBlock(_ message: String, modelID: String) -> Bool {
+        guard modelID != "claude-sonnet-5-5" else { return false }
+        let lower = message.lowercased()
+        return lower.contains("reasoning_extraction")
+            || lower.contains("can't respond to this message with")
+            || lower.contains("change your model")
+    }
+
+    private func callClaudeOnce(_ req: ModelCallRequest, modelOverride: String?) async throws -> String {
         guard let binary = BinaryLocator.findBinary("claude", home: realHome) else {
             throw ModelRunnerError.binaryNotFound(.claude)
         }
+
+        let effectiveModel = modelOverride ?? req.modelID
+        // When falling back due to reasoning_extraction, also use medium/high effort rather than xhigh/max
+        let effectiveEffort = (modelOverride != nil && (req.effort == .max || req.effort == .xhigh)) ? "high" : req.effort.rawValue
 
         let (cwd, shouldClean) = resolveWorkingDirectory(for: req)
         defer { if shouldClean { try? FileManager.default.removeItem(at: cwd) } }
 
         var args: [String] = [
             "-p",
-            "--model", req.modelID,
-            "--effort", req.effort.rawValue,
+            "--model", effectiveModel,
+            "--effort", effectiveEffort,
             "--output-format", "json",
             "--system-prompt", req.systemPrompt,
             "--disable-slash-commands",
@@ -184,26 +206,38 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
             }
         }
 
-        let out = try await runSubprocess(
-            executable: binary,
-            arguments: args,
-            cwd: cwd,
-            stdinText: req.userPrompt,
-            label: "claude/\(req.modelID)"
-        )
+        let out: String
+        do {
+            out = try await runSubprocess(
+                executable: binary,
+                arguments: args,
+                cwd: cwd,
+                stdinText: req.userPrompt,
+                label: "claude/\(effectiveModel)"
+            )
+        } catch let ModelRunnerError.processFailed(rawErr) {
+            // Claude CLI writes structured JSON to stdout even when exiting with status 1; extract clean `result` message if present.
+            if let brace = rawErr.firstIndex(of: "{"),
+               let data = String(rawErr[brace...]).data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let cleanMsg = json["result"] as? String {
+                throw ModelRunnerError.processFailed("Claude (\(effectiveModel)): \(cleanMsg)")
+            }
+            throw ModelRunnerError.processFailed(rawErr)
+        }
 
         guard let data = out.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { return trimmed }
-            throw ModelRunnerError.emptyResponse("claude/\(req.modelID)")
+            throw ModelRunnerError.emptyResponse("claude/\(effectiveModel)")
         }
         if (json["is_error"] as? Bool) == true {
             let msg = (json["result"] as? String) ?? "Unknown Claude CLI error"
-            throw ModelRunnerError.processFailed("Claude (\(req.modelID)): \(msg)")
+            throw ModelRunnerError.processFailed("Claude (\(effectiveModel)): \(msg)")
         }
         guard let result = (json["result"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !result.isEmpty else {
-            throw ModelRunnerError.emptyResponse("claude/\(req.modelID)")
+            throw ModelRunnerError.emptyResponse("claude/\(effectiveModel)")
         }
         return result
     }

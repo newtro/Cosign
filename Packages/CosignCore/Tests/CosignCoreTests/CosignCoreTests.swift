@@ -259,6 +259,57 @@ final class CosignCoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(speechBox.withLock { $0.count }, 10)
     }
 
+    func testResumeInterruptedDebateAndSingleSeatFailureResilience() async throws {
+        let personas = DefaultRoster.personas
+        let moderator = personas.first { $0.role == .moderator }!
+        let debaters = Array(personas.filter { $0.role == .debater }.prefix(3))
+
+        // Simulate one seat failing while the other two succeed
+        let runner = FakeModelRunner { req in
+            if req.provider == .claude {
+                throw ModelRunnerError.processFailed("Simulated provider outage")
+            }
+            return ModelCallResponse(rawText: """
+            {
+              "stance": "cosigning",
+              "headline": "Resilient Verdict",
+              "spoken_verdict": "Here is our verdict.",
+              "recommendation": "Ship it.",
+              "spoken_take": "Solid plan.",
+              "supporting_notes": "Notes here.",
+              "key_points": ["Point 1"]
+            }
+            """, durationMs: 25)
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        var erroredSession = DebateSession(
+            title: "Interrupted Session",
+            moderatorID: moderator.id,
+            debaterIDs: debaters.map(\.id),
+            maxRebuttalRounds: 1,
+            stage: .error,
+            entries: [
+                .userPrompt(UserPromptMessage(text: "Test prompt")),
+                .roundBanner(RoundBanner(roundNumber: 1, title: "Round 1", subtitle: "")),
+                .systemNote(UUID(), "Previous error")
+            ]
+        )
+
+        erroredSession = try await orchestrator.resumeInterruptedDebate(
+            into: erroredSession,
+            moderator: moderator,
+            debaters: debaters
+        ) { _ in }
+
+        XCTAssertEqual(erroredSession.stage, .completed)
+        let hasVerdict = erroredSession.entries.contains {
+            if case .verdict = $0 { return true }
+            return false
+        }
+        XCTAssertTrue(hasVerdict)
+    }
+
     func testSessionStoreRoundTrip() throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-store-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tempDir) }

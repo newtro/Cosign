@@ -155,20 +155,34 @@ struct CosignRootView: View {
         case .verdict(let verdict):
             CosignVerdictCardView(model: model, verdict: verdict)
         case .systemNote(_, let note):
-            HStack(spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundStyle(StudioTheme.crimson)
                 Text(note)
                     .font(.system(size: 12.5))
                     .foregroundStyle(StudioTheme.inkSecondary)
                     .textSelection(.enabled)
+                Spacer(minLength: 8)
+                if let current = model.currentSession,
+                   (current.stage == .error || current.stage == .cancelled) {
+                    Button {
+                        model.resumeCurrentSession()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("Retry & Resume")
+                        }
+                    }
+                    .buttonStyle(BrassPrimaryButtonStyle())
+                }
             }
-            .padding(12)
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(StudioTheme.crimson.opacity(0.09))
-                    .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(StudioTheme.crimson.opacity(0.28), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(StudioTheme.crimson.opacity(0.28), lineWidth: 1))
             )
         }
     }

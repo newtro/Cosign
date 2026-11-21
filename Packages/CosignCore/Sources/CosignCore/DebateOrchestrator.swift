@@ -127,7 +127,7 @@ public final class DebateOrchestrator: Sendable {
                     if !questions.isEmpty {
                         let spokenIntro = (json["spoken_intro"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
                             ?? "Before the panel dives in, we have \(questions.count == 1 ? "one quick question" : "\(questions.count) quick questions") to sharpen this."
-                        let reasoning = (json["thought_process"] as? String) ?? ""
+                        let reasoning = (json["supporting_notes"] as? String) ?? (json["thought_process"] as? String) ?? ""
                         let exchange = InterviewExchange(
                             moderatorID: moderator.id,
                             moderatorName: moderator.name,
@@ -197,6 +197,46 @@ public final class DebateOrchestrator: Sendable {
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             isFollowUpRound: false,
+            onEvent: onEvent
+        )
+    }
+
+    /// Resumes an interrupted (`.error` or `.cancelled`) session from its saved user prompt & interview answers,
+    /// cleaning up trailing error notes or an empty trailing round banner so the timeline stays spotless.
+    public func resumeInterruptedDebate(
+        into initialSession: DebateSession,
+        moderator: Persona,
+        debaters: [Persona],
+        modelLabels: [String: String] = [:],
+        openRouterKey: String? = nil,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async throws -> DebateSession {
+        var session = initialSession
+        // Strip trailing system error notes
+        while let last = session.entries.last {
+            if case .systemNote = last {
+                session.entries.removeLast()
+            } else if case .roundBanner = last {
+                // Remove orphan round banner that had zero turns after it
+                session.entries.removeLast()
+            } else {
+                break
+            }
+        }
+        session.updatedAt = Date()
+        await onEvent(.sessionUpdated(session))
+
+        let hadPriorVerdict = session.entries.contains {
+            if case .verdict = $0 { return true }
+            return false
+        }
+        return try await runDebateToVerdict(
+            session: session,
+            moderator: moderator,
+            debaters: debaters,
+            modelLabels: modelLabels,
+            openRouterKey: openRouterKey,
+            isFollowUpRound: hadPriorVerdict,
             onEvent: onEvent
         )
     }
@@ -347,13 +387,17 @@ public final class DebateOrchestrator: Sendable {
                 : "Round 1: Panelists forming independent positions…"
         ))
 
-        let blindTurns = try await runParallelBlindOpeningRound(
+        let (blindTurns, blindFailures) = try await runParallelBlindOpeningRound(
             debaters: debaters,
             transcriptContext: baseContext,
             session: session,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey
         )
+
+        for failureNote in blindFailures {
+            session.entries.append(.systemNote(UUID(), failureNote))
+        }
 
         for turn in blindTurns {
             try Task.checkCancellation()
@@ -375,7 +419,7 @@ public final class DebateOrchestrator: Sendable {
             try Task.checkCancellation()
             await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is framing the clash on the floor…"))
             let r1Board = buildTranscriptContext(for: session)
-            let chairResp = try await runner.call(ModelCallRequest(
+            if let chairResp = try? await runner.call(ModelCallRequest(
                 provider: moderator.provider,
                 modelID: moderator.modelID,
                 effort: .medium,
@@ -385,25 +429,26 @@ public final class DebateOrchestrator: Sendable {
                 toolPhase: .closedBook,
                 workspacePath: session.workspacePath,
                 openRouterAPIKey: openRouterKey
-            ))
-            let chairTurn = parseDebateTurn(
-                raw: chairResp.rawText,
-                durationMs: chairResp.durationMs,
-                roundNumber: 1,
-                roundLabel: "Chair",
-                persona: moderator,
-                modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
-                defaultStance: .moderating
-            )
-            session.entries.append(.turn(chairTurn))
-            session.updatedAt = Date()
-            await onEvent(.sessionUpdated(session))
-            await onEvent(.enqueueSpeech(SpeechQueueItem(
-                id: chairTurn.id,
-                persona: moderator,
-                spokenText: chairTurn.spokenTake,
-                contextLabel: "\(moderator.name) · Directing Floor"
-            )))
+            )) {
+                let chairTurn = parseDebateTurn(
+                    raw: chairResp.rawText,
+                    durationMs: chairResp.durationMs,
+                    roundNumber: 1,
+                    roundLabel: "Chair",
+                    persona: moderator,
+                    modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
+                    defaultStance: .moderating
+                )
+                session.entries.append(.turn(chairTurn))
+                session.updatedAt = Date()
+                await onEvent(.sessionUpdated(session))
+                await onEvent(.enqueueSpeech(SpeechQueueItem(
+                    id: chairTurn.id,
+                    persona: moderator,
+                    spokenText: chairTurn.spokenTake,
+                    contextLabel: "\(moderator.name) · Directing Floor"
+                )))
+            }
         }
 
         // --- ROUNDS 2..N: Live Inter-Persona Conversation & Direct Exchanges ---
@@ -431,25 +476,34 @@ public final class DebateOrchestrator: Sendable {
                 await onEvent(.activeThinkersChanged([debater.id], statusLabel: "Round \(roundNum): \(debater.name) has the floor…"))
 
                 let liveBoard = buildTranscriptContext(for: session)
-                let resp = try await runner.call(ModelCallRequest(
-                    provider: debater.provider,
-                    modelID: debater.modelID,
-                    effort: debater.effort,
-                    systemPrompt: DebatePrompts.rebuttalSystemPrompt(
-                        debater: debater,
-                        allDebaters: debaters,
-                        moderatorName: moderator.name,
-                        roundNumber: roundNum,
-                        isFinalRebuttal: isFinal,
+                let resp: ModelCallResponse
+                do {
+                    resp = try await runner.call(ModelCallRequest(
+                        provider: debater.provider,
+                        modelID: debater.modelID,
+                        effort: debater.effort,
+                        systemPrompt: DebatePrompts.rebuttalSystemPrompt(
+                            debater: debater,
+                            allDebaters: debaters,
+                            moderatorName: moderator.name,
+                            roundNumber: roundNum,
+                            isFinalRebuttal: isFinal,
+                            workspacePath: session.workspacePath,
+                            toolsEnabled: session.hasFullCLITools
+                        ),
+                        userPrompt: liveBoard,
+                        allowWebSearch: session.allowWebSearch,
+                        toolPhase: researchPhase(for: session),
                         workspacePath: session.workspacePath,
-                        toolsEnabled: session.hasFullCLITools
-                    ),
-                    userPrompt: liveBoard,
-                    allowWebSearch: session.allowWebSearch,
-                    toolPhase: researchPhase(for: session),
-                    workspacePath: session.workspacePath,
-                    openRouterAPIKey: openRouterKey
-                ))
+                        openRouterAPIKey: openRouterKey
+                    ))
+                } catch {
+                    if Task.isCancelled { throw ModelRunnerError.cancelled }
+                    if case ModelRunnerError.cancelled = error { throw error }
+                    session.entries.append(.systemNote(UUID(), "\(debater.name) skipped Round \(roundNum): \(error.localizedDescription)"))
+                    await onEvent(.sessionUpdated(session))
+                    continue
+                }
 
                 let turn = parseDebateTurn(
                     raw: resp.rawText,
@@ -597,49 +651,73 @@ public final class DebateOrchestrator: Sendable {
         session: DebateSession,
         modelLabels: [String: String],
         openRouterKey: String?
-    ) async throws -> [DebateTurn] {
+    ) async throws -> ([DebateTurn], [String]) {
         let phase = researchPhase(for: session)
         let ws = session.workspacePath
         let toolsOn = session.hasFullCLITools
         let webOn = session.allowWebSearch
 
-        return try await withThrowingTaskGroup(of: (Int, DebateTurn).self) { group in
+        return try await withThrowingTaskGroup(of: (Int, String, Result<DebateTurn, Error>).self) { group in
             for (index, debater) in debaters.enumerated() {
                 let modelLabel = modelLabels[debater.modelID] ?? debater.modelID
                 group.addTask { [runner] in
-                    let resp = try await runner.call(ModelCallRequest(
-                        provider: debater.provider,
-                        modelID: debater.modelID,
-                        effort: debater.effort,
-                        systemPrompt: DebatePrompts.blindOpeningSystemPrompt(
-                            debater: debater,
-                            allDebaters: debaters,
+                    do {
+                        let resp = try await runner.call(ModelCallRequest(
+                            provider: debater.provider,
+                            modelID: debater.modelID,
+                            effort: debater.effort,
+                            systemPrompt: DebatePrompts.blindOpeningSystemPrompt(
+                                debater: debater,
+                                allDebaters: debaters,
+                                workspacePath: ws,
+                                toolsEnabled: toolsOn
+                            ),
+                            userPrompt: transcriptContext,
+                            allowWebSearch: webOn,
+                            toolPhase: phase,
                             workspacePath: ws,
-                            toolsEnabled: toolsOn
-                        ),
-                        userPrompt: transcriptContext,
-                        allowWebSearch: webOn,
-                        toolPhase: phase,
-                        workspacePath: ws,
-                        openRouterAPIKey: openRouterKey
-                    ))
-                    let turn = self.parseDebateTurn(
-                        raw: resp.rawText,
-                        durationMs: resp.durationMs,
-                        roundNumber: 1,
-                        roundLabel: "Round 1",
-                        persona: debater,
-                        modelLabel: modelLabel,
-                        defaultStance: .opening
-                    )
-                    return (index, turn)
+                            openRouterAPIKey: openRouterKey
+                        ))
+                        let turn = self.parseDebateTurn(
+                            raw: resp.rawText,
+                            durationMs: resp.durationMs,
+                            roundNumber: 1,
+                            roundLabel: "Round 1",
+                            persona: debater,
+                            modelLabel: modelLabel,
+                            defaultStance: .opening
+                        )
+                        return (index, debater.name, .success(turn))
+                    } catch {
+                        return (index, debater.name, .failure(error))
+                    }
                 }
             }
-            var indexed: [(Int, DebateTurn)] = []
-            for try await pair in group {
-                indexed.append(pair)
+
+            var successes: [(Int, DebateTurn)] = []
+            var failures: [String] = []
+            var firstError: Error?
+
+            for try await (idx, name, result) in group {
+                switch result {
+                case .success(let turn):
+                    successes.append((idx, turn))
+                case .failure(let err):
+                    if Task.isCancelled {
+                        throw ModelRunnerError.cancelled
+                    }
+                    if case ModelRunnerError.cancelled = err {
+                        throw err
+                    }
+                    firstError = firstError ?? err
+                    failures.append("\(name) skipped this round: \(err.localizedDescription)")
+                }
             }
-            return indexed.sorted { $0.0 < $1.0 }.map(\.1)
+
+            if successes.isEmpty, let firstError {
+                throw firstError
+            }
+            return (successes.sorted { $0.0 < $1.0 }.map(\.1), failures)
         }
     }
 
@@ -717,7 +795,8 @@ public final class DebateOrchestrator: Sendable {
             let stance = StanceKind(rawValue: stanceRaw) ?? defaultStance
             let target = (json["target_persona"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             let spoken = (json["spoken_take"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let thought = (json["thought_process"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let thought = ((json["supporting_notes"] as? String) ?? (json["thought_process"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let points = (json["key_points"] as? [String])?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } ?? []
             let directQ = (json["direct_question_for_peer"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             let toolsUsed = (json["tools_used"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -774,7 +853,7 @@ public final class DebateOrchestrator: Sendable {
             let steps = (json["action_steps"] as? [String])?.filter { !$0.isEmpty } ?? []
             let tradeoffs = (json["key_tradeoffs"] as? [String])?.filter { !$0.isEmpty } ?? []
             let rawCosigned = (json["cosigned_by"] as? [String]) ?? debaters.map(\.name)
-            let thought = (json["thought_process"] as? String) ?? ""
+            let thought = (json["supporting_notes"] as? String) ?? (json["thought_process"] as? String) ?? ""
             let autoExec = (json["should_auto_execute"] as? Bool) ?? false
 
             var cosignedIDs: [UUID] = []
