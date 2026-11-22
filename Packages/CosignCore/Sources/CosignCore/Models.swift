@@ -152,6 +152,79 @@ public enum PersonaRole: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 }
 
+public struct PersonaSpecialtyOption: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let label: String
+    public let symbolName: String
+    public let keywords: [String]
+
+    public init(id: String, label: String, symbolName: String, keywords: [String]) {
+        self.id = id
+        self.label = label
+        self.symbolName = symbolName
+        self.keywords = keywords
+    }
+}
+
+public enum PersonaSpecialty {
+    public static let writingAndCopy = "Writing & Copy"
+    public static let frontendAndUI = "Frontend & UI"
+    public static let systemsAndBackend = "Systems & Backend"
+    public static let testsAndQA = "Tests & QA"
+    public static let creativeAndDesign = "Creative & Design"
+    public static let toolingAndScripts = "Tooling & Scripts"
+    public static let visualPolish = "Visual & AAA Polish"
+
+    public static let presets: [PersonaSpecialtyOption] = [
+        PersonaSpecialtyOption(
+            id: writingAndCopy,
+            label: writingAndCopy,
+            symbolName: "text.quote",
+            keywords: ["write", "writing", "text", "copy", "prose", "dialogue", "narrative", "story", "readme", "doc", "docs", "markdown", "pitch", "application", "onboarding", "microcopy"]
+        ),
+        PersonaSpecialtyOption(
+            id: frontendAndUI,
+            label: frontendAndUI,
+            symbolName: "paintbrush.pointed.fill",
+            keywords: ["ui", "ux", "frontend", "view", "swiftui", "hud", "layout", "menu", "screen", "button", "sheet"]
+        ),
+        PersonaSpecialtyOption(
+            id: systemsAndBackend,
+            label: systemsAndBackend,
+            symbolName: "cpu.fill",
+            keywords: ["backend", "server", "engine", "system", "state", "protocol", "network", "database", "core", "api", "performance"]
+        ),
+        PersonaSpecialtyOption(
+            id: testsAndQA,
+            label: testsAndQA,
+            symbolName: "checkmark.shield.fill",
+            keywords: ["test", "tests", "qa", "verify", "verification", "audit", "security", "edge case", "regression"]
+        ),
+        PersonaSpecialtyOption(
+            id: creativeAndDesign,
+            label: creativeAndDesign,
+            symbolName: "sparkles",
+            keywords: ["creative", "game design", "worldbuilding", "mechanic", "concept", "encounter", "idea"]
+        ),
+        PersonaSpecialtyOption(
+            id: toolingAndScripts,
+            label: toolingAndScripts,
+            symbolName: "terminal.fill",
+            keywords: ["cli", "script", "scripts", "tooling", "pipeline", "build script", "automation", "migration"]
+        ),
+        PersonaSpecialtyOption(
+            id: visualPolish,
+            label: visualPolish,
+            symbolName: "eye.fill",
+            keywords: ["visual", "aaa", "shader", "lighting", "animation", "prefab", "art", "polish", "material", "vfx"]
+        ),
+    ]
+
+    public static func symbol(for label: String) -> String {
+        presets.first(where: { $0.label.caseInsensitiveCompare(label) == .orderedSame })?.symbolName ?? "star.fill"
+    }
+}
+
 public struct Persona: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var name: String
@@ -163,6 +236,10 @@ public struct Persona: Identifiable, Codable, Hashable, Sendable {
     public var effort: ReasoningEffort
     public var personality: String
     public var debateStyle: String
+    /// Task domains where this persona/model excels and should be preferred by the Chair (e.g. `["Writing & Copy"]`).
+    public var taskSpecialties: [String]?
+    /// Optional freeform routing rule telling the Chair when to pick this persona (e.g. `"Choose for writing text, dialogue, and docs"`).
+    public var routingSignal: String?
     public var accentHex: String
     public var avatarSymbol: String
     public var voicePresetID: String
@@ -181,6 +258,8 @@ public struct Persona: Identifiable, Codable, Hashable, Sendable {
         effort: ReasoningEffort = .high,
         personality: String,
         debateStyle: String,
+        taskSpecialties: [String]? = nil,
+        routingSignal: String? = nil,
         accentHex: String,
         avatarSymbol: String,
         voicePresetID: String,
@@ -198,12 +277,57 @@ public struct Persona: Identifiable, Codable, Hashable, Sendable {
         self.effort = effort
         self.personality = personality
         self.debateStyle = debateStyle
+        self.taskSpecialties = (taskSpecialties?.isEmpty == true) ? nil : taskSpecialties
+        let trimmedSignal = routingSignal?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.routingSignal = trimmedSignal.isEmpty ? nil : trimmedSignal
         self.accentHex = accentHex
         self.avatarSymbol = avatarSymbol
         self.voicePresetID = voicePresetID
         self.customVoicePath = customVoicePath
         self.voiceExaggeration = voiceExaggeration
         self.isBuiltIn = isBuiltIn
+    }
+
+    public var activeSpecialties: [String] {
+        (taskSpecialties ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    public var routingDescription: String? {
+        let tags = activeSpecialties
+        let note = (routingSignal ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if tags.isEmpty && note.isEmpty { return nil }
+        if !tags.isEmpty && !note.isEmpty {
+            return "PREFERRED FOR: \(tags.joined(separator: ", ")) — \(note)"
+        } else if !tags.isEmpty {
+            return "PREFERRED FOR: \(tags.joined(separator: ", "))"
+        } else {
+            return "PREFERRED FOR: \(note)"
+        }
+    }
+
+    /// Computes how strongly this persona's explicit `taskSpecialties` and `routingSignal` match a task description.
+    public func domainAffinityScore(for taskText: String) -> Int {
+        let lowerTask = taskText.lowercased()
+        var score = 0
+        for tag in activeSpecialties {
+            if lowerTask.contains(tag.lowercased()) {
+                score += 4
+            }
+            if let preset = PersonaSpecialty.presets.first(where: { $0.label.caseInsensitiveCompare(tag) == .orderedSame }) {
+                for kw in preset.keywords where lowerTask.contains(kw) {
+                    score += 3
+                }
+            }
+        }
+        if let signal = routingSignal?.lowercased(), !signal.isEmpty {
+            let signalWords = signal
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 4 && !["choose", "pick", "when", "this", "persona", "tasks", "task", "good", "best", "with", "that"].contains($0) }
+            for word in Set(signalWords) where lowerTask.contains(word) {
+                score += 2
+            }
+        }
+        return score
     }
 
     public var initials: String {
@@ -677,14 +801,26 @@ public enum HandoffPromptBuilder {
         }
 
         // Original Goal & Clarified Constraints
-        let userPrompts = session.entries.compactMap { entry -> String? in
-            if case .userPrompt(let m) = entry { return m.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let userMessages = session.entries.compactMap { entry -> UserPromptMessage? in
+            if case .userPrompt(let m) = entry { return m }
             return nil
         }
-        if let initialGoal = userPrompts.first, !initialGoal.isEmpty {
-            out.append("## Goal & Context")
-            out.append(initialGoal)
-            out.append("")
+        if let firstMsg = userMessages.first {
+            let initialGoal = firstMsg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !initialGoal.isEmpty || !firstMsg.imageAttachments.isEmpty {
+                out.append("## Goal & Context")
+                if !initialGoal.isEmpty {
+                    out.append(initialGoal)
+                }
+                if !firstMsg.imageAttachments.isEmpty {
+                    out.append("")
+                    out.append("**Attached Reference Images:**")
+                    for img in firstMsg.imageAttachments {
+                        out.append("- `\(img.filePath)` (\(img.displayName))")
+                    }
+                }
+                out.append("")
+            }
         }
 
         let answeredQuestions = session.entries.compactMap { entry -> [InterviewQuestion]? in
@@ -757,7 +893,10 @@ public enum HandoffPromptBuilder {
             for entry in trailingEntries {
                 switch entry {
                 case .userPrompt(let msg):
-                    followUps.append("- **User Follow-Up:** \(msg.text)")
+                    let imgNote = msg.imageAttachments.isEmpty
+                        ? ""
+                        : " [Images: " + msg.imageAttachments.map { "`\($0.filePath)`" }.joined(separator: ", ") + "]"
+                    followUps.append("- **User Follow-Up:** \(msg.text)\(imgNote)")
                 case .turn(let t):
                     let clean = t.spokenTake
                         .replacingOccurrences(of: #"[\[\(](chuckle|laugh|sigh|clears? throat|cough|gasp|groan)[\]\)]"#, with: "", options: [.regularExpression, .caseInsensitive])
@@ -803,14 +942,50 @@ public enum HandoffPromptBuilder {
     }
 }
 
+public struct ChatImageAttachment: Identifiable, Codable, Hashable, Sendable {
+    public var id: UUID
+    public var filePath: String
+    public var displayName: String
+    public var mimeType: String
+    public var widthPx: Int?
+    public var heightPx: Int?
+
+    public init(
+        id: UUID = UUID(),
+        filePath: String,
+        displayName: String,
+        mimeType: String = "image/png",
+        widthPx: Int? = nil,
+        heightPx: Int? = nil
+    ) {
+        self.id = id
+        self.filePath = filePath
+        self.displayName = displayName
+        self.mimeType = mimeType
+        self.widthPx = widthPx
+        self.heightPx = heightPx
+    }
+}
+
 public struct UserPromptMessage: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var text: String
+    public var attachments: [ChatImageAttachment]?
     public var createdAt: Date
 
-    public init(id: UUID = UUID(), text: String, createdAt: Date = Date()) {
+    public var imageAttachments: [ChatImageAttachment] {
+        attachments ?? []
+    }
+
+    public init(
+        id: UUID = UUID(),
+        text: String,
+        attachments: [ChatImageAttachment]? = nil,
+        createdAt: Date = Date()
+    ) {
         self.id = id
         self.text = text
+        self.attachments = (attachments?.isEmpty == true) ? nil : attachments
         self.createdAt = createdAt
     }
 }

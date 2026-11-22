@@ -3,6 +3,7 @@ import Combine
 import CosignCore
 import CosignVoice
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -31,6 +32,8 @@ final class AppModel: ObservableObject {
     @Published var showingLineupPopover: Bool = false
     @Published var activeHandoffVerdict: CosignVerdict?
     @Published var activeBuildLaunchVerdict: CosignVerdict?
+    @Published var pendingAttachmentsBySession: [UUID: [ChatImageAttachment]] = [:]
+    @Published var activePreviewAttachment: ChatImageAttachment?
 
     let store: SessionStore
     let voiceEngine: VoiceEngine
@@ -407,11 +410,123 @@ final class AppModel: ObservableObject {
         updateSessionInPlace(session)
     }
 
+    // MARK: - Chat Image Paste, Drag-and-Drop & File Attachment
+
+    var currentPendingAttachments: [ChatImageAttachment] {
+        guard let sessionID = currentSession?.id else { return [] }
+        return pendingAttachmentsBySession[sessionID] ?? []
+    }
+
+    func removePendingAttachment(_ attachmentID: UUID) {
+        guard let sessionID = currentSession?.id else { return }
+        pendingAttachmentsBySession[sessionID]?.removeAll { $0.id == attachmentID }
+    }
+
+    func attachImagesWithOpenPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Attach Image(s) or Screenshots"
+        panel.message = "Choose one or more screenshots, mockups, or diagrams for the council to inspect."
+        panel.prompt = "Attach"
+        panel.allowedContentTypes = [.image]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            _ = attachImagesFromURLs(panel.urls)
+        }
+    }
+
+    @discardableResult
+    func attachImagesFromURLs(_ urls: [URL]) -> Int {
+        guard let sessionID = currentSession?.id else { return 0 }
+        var current = pendingAttachmentsBySession[sessionID] ?? []
+        var added = 0
+        for url in urls where SessionStore.isSupportedImageURL(url) {
+            if current.count >= 8 { break }
+            if let imported = try? store.importImageFile(from: url) {
+                current.append(imported)
+                added += 1
+            }
+        }
+        if added > 0 {
+            pendingAttachmentsBySession[sessionID] = current
+        }
+        return added
+    }
+
+    @discardableResult
+    func attachImageData(_ data: Data, preferredName: String = "Pasted-Image") -> Bool {
+        guard let sessionID = currentSession?.id else { return false }
+        var current = pendingAttachmentsBySession[sessionID] ?? []
+        guard current.count < 8 else { return false }
+        guard let saved = try? store.saveImageData(data, preferredName: preferredName) else { return false }
+        current.append(saved)
+        pendingAttachmentsBySession[sessionID] = current
+        return true
+    }
+
+    /// Extracts copied image files (from Finder) or raw clipboard bitmaps/screenshots (`⌘⌃⇧4`, CleanShot, browser Copy Image)
+    /// and stages them onto the current session's composer. Returns `true` if at least one image was attached.
+    @discardableResult
+    func attachImagesFromPasteboard(_ pasteboard: NSPasteboard = .general) -> Bool {
+        // 1. Check copied image file URLs from Finder first
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            let imageURLs = urls.filter { SessionStore.isSupportedImageURL($0) }
+            if !imageURLs.isEmpty {
+                return attachImagesFromURLs(imageURLs) > 0
+            }
+        }
+
+        // 2. If the clipboard holds plain text without image bitmap data, let normal text paste run!
+        let hasPNG = pasteboard.data(forType: .png) != nil
+        let hasTIFF = pasteboard.data(forType: .tiff) != nil
+        guard hasPNG || hasTIFF else { return false }
+
+        // Note: Some rich-text apps place BOTH plain string text and an icon/thumbnail TIFF on the pasteboard;
+        // if plain non-empty text exists AND there is no raw PNG screenshot data, prefer pasting the text unless NSImage is large.
+        let plainText = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !plainText.isEmpty && !hasPNG {
+            return false
+        }
+
+        let timestamp = Self.pasteTimestampLabel()
+        if let pngData = pasteboard.data(forType: .png) {
+            return attachImageData(pngData, preferredName: "Screenshot-\(timestamp)")
+        }
+        if let tiffData = pasteboard.data(forType: .tiff) {
+            if let rep = NSBitmapImageRep(data: tiffData),
+               let pngData = rep.representation(using: .png, properties: [:]) {
+                return attachImageData(pngData, preferredName: "Screenshot-\(timestamp)")
+            }
+            return attachImageData(tiffData, preferredName: "Screenshot-\(timestamp)")
+        }
+        return false
+    }
+
+    private static func pasteTimestampLabel() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HHmmss"
+        return f.string(from: Date())
+    }
+
+    func togglePersonaSpecialty(personaID: UUID, specialty: String) {
+        guard var target = persona(for: personaID) else { return }
+        var tags = target.activeSpecialties
+        if let existingIdx = tags.firstIndex(where: { $0.caseInsensitiveCompare(specialty) == .orderedSame }) {
+            tags.remove(at: existingIdx)
+        } else {
+            tags.append(specialty)
+        }
+        target.taskSpecialties = tags.isEmpty ? nil : tags
+        upsertPersona(target)
+    }
+
     // MARK: - Running Debates & Interviews
 
     func sendPrompt(_ text: String, skipInterview: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, var session = currentSession, !session.stage.isBusy else { return }
+        let stagedAttachments = currentPendingAttachments
+        guard (!trimmed.isEmpty || !stagedAttachments.isEmpty), var session = currentSession, !session.stage.isBusy else { return }
 
         // In Build Mode, if no dedicated project folder was picked yet (still pointing at parent repos root),
         // prompt the user right now so they can pick a project directory or click 'New Folder' to create one!
@@ -425,6 +540,7 @@ final class AppModel: ObservableObject {
             session = refreshed
         }
 
+        pendingAttachmentsBySession[session.id] = nil
         lastErrorBanner = nil
         voiceEngine.stopAll()
 
@@ -440,6 +556,7 @@ final class AppModel: ObservableObject {
             do {
                 let finalSession = try await self.orchestrator.submitUserMessage(
                     text: trimmed,
+                    attachments: stagedAttachments,
                     into: session,
                     moderator: moderator,
                     debaters: debaters,

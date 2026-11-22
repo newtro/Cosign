@@ -993,4 +993,91 @@ final class CosignCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.wave2SawCompletedWave1Count, 3, "Expected Wave 2 to start only after all 3 Wave-1 tasks finished")
         XCTAssertGreaterThanOrEqual(snapshot.maxActiveThinkerBadgeCount, 3)
     }
+
+    func testImageAttachmentPersistenceForwardingAndPersonaTaskRouting() async throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-attach-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let store = SessionStore(rootDirectory: tempRoot)
+
+        // Valid 1x1 transparent PNG bytes
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        let pngData = Data(base64Encoded: pngBase64)!
+        let attachment = try store.saveImageData(pngData, preferredName: "Mockup Screenshot")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: attachment.filePath))
+        XCTAssertEqual(attachment.widthPx, 1)
+        XCTAssertEqual(attachment.heightPx, 1)
+
+        // Verify Persona task specialty & custom routing signal scoring + prompt injection
+        let allPersonas = DefaultRoster.personas
+        let moderator = allPersonas.first { $0.id == DefaultRoster.atlasID }!
+        let forge = allPersonas.first { $0.id == DefaultRoster.forgeID }!
+        var neonWriter = allPersonas.first { $0.id == DefaultRoster.orionID }!
+        neonWriter.taskSpecialties = [PersonaSpecialty.writingAndCopy]
+        neonWriter.routingSignal = "Always choose this Gemini Neon persona for writing text, dialogue, and prose."
+
+        let routingPrompt = DebatePrompts.specialistRoutingBlock([forge, neonWriter])
+        XCTAssertTrue(routingPrompt.contains("PREFERRED FOR: Writing & Copy"))
+        XCTAssertTrue(routingPrompt.contains("Always choose this Gemini Neon persona for writing text"))
+
+        let seenImageCounts = LockedBox<[Int]>([])
+        let runner = FakeModelRunner { req in
+            seenImageCounts.withLock { $0.append(req.imagePaths.count) }
+            XCTAssertEqual(req.imagePaths, [attachment.filePath])
+            XCTAssertTrue(req.userPrompt.contains("ATTACHED USER IMAGE(S):"))
+            return ModelCallResponse(rawText: """
+            {
+              "session_title": "Visual Mockup Review",
+              "needs_interview": false,
+              "stance": "cosigning",
+              "headline": "Mockup Reviewed",
+              "spoken_verdict": "Looks crisp.",
+              "recommendation": "Ship mockup layout.",
+              "spoken_take": "Inspected attached screenshot.",
+              "supporting_notes": "Checked mockup."
+            }
+            """, durationMs: 10)
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        // Verify domain-aware builder picker picks Neon Writer for text-writing tasks and Forge for backend engine tasks
+        let chosenForText = orchestrator.selectPrimaryBuilder(
+            from: [forge, neonWriter],
+            excluding: nil,
+            fallback: moderator,
+            forTask: "Write narrative story text, NPC dialogue, and onboarding README copy"
+        )
+        XCTAssertEqual(chosenForText.id, neonWriter.id)
+
+        let chosenForSystems = orchestrator.selectPrimaryBuilder(
+            from: [forge, neonWriter],
+            excluding: nil,
+            fallback: moderator,
+            forTask: "Implement TCP server socket state protocol"
+        )
+        XCTAssertEqual(chosenForSystems.id, forge.id)
+
+        // Submit image-only prompt (empty text + 1 image attachment) and verify every model call receives the image!
+        let session = DebateSession(
+            moderatorID: moderator.id,
+            debaterIDs: [forge.id, neonWriter.id],
+            maxRebuttalRounds: 1
+        )
+        let completed = try await orchestrator.submitUserMessage(
+            text: "",
+            attachments: [attachment],
+            into: session,
+            moderator: moderator,
+            debaters: [forge, neonWriter],
+            allPersonas: allPersonas
+        ) { _ in }
+
+        XCTAssertEqual(completed.stage, .completed)
+        XCTAssertGreaterThanOrEqual(seenImageCounts.withLock { $0.count }, 4)
+        if case .userPrompt(let savedMsg) = completed.entries.first {
+            XCTAssertEqual(savedMsg.imageAttachments.count, 1)
+            XCTAssertEqual(savedMsg.imageAttachments.first?.filePath, attachment.filePath)
+        } else {
+            XCTFail("Expected userPrompt entry with image attachment")
+        }
+    }
 }

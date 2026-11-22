@@ -32,8 +32,29 @@ public final class DebateOrchestrator: Sendable {
         session.hasFullCLITools ? .researchAndInspect : .closedBook
     }
 
+    public static func activeImagePaths(in session: DebateSession) -> [String] {
+        var paths: [String] = []
+        for entry in session.entries {
+            if case .userPrompt(let msg) = entry {
+                for att in msg.imageAttachments where !att.filePath.isEmpty && !paths.contains(att.filePath) {
+                    paths.append(att.filePath)
+                }
+            }
+        }
+        return Array(paths.suffix(8))
+    }
+
+    private func callModel(_ request: ModelCallRequest, in session: DebateSession) async throws -> ModelCallResponse {
+        var req = request
+        if req.imagePaths.isEmpty {
+            req.imagePaths = Self.activeImagePaths(in: session)
+        }
+        return try await runner.call(req)
+    }
+
     public func submitUserMessage(
         text: String,
+        attachments: [ChatImageAttachment] = [],
         into initialSession: DebateSession,
         moderator: Persona,
         debaters: [Persona],
@@ -44,15 +65,20 @@ public final class DebateOrchestrator: Sendable {
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return session }
+        let trimmedRaw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRaw.isEmpty || !attachments.isEmpty else { return session }
+        let trimmed = trimmedRaw.isEmpty
+            ? (session.activeMode == .build
+                ? "Inspect the attached reference image(s) and implement/fix accordingly."
+                : "Inspect the attached image(s) and share your assessment.")
+            : trimmedRaw
 
         let hadPriorVerdict = session.entries.contains {
             if case .verdict = $0 { return true }
             return false
         }
 
-        session.entries.append(.userPrompt(UserPromptMessage(text: trimmed)))
+        session.entries.append(.userPrompt(UserPromptMessage(text: trimmed, attachments: attachments)))
         session.updatedAt = Date()
         await onEvent(.sessionUpdated(session))
 
@@ -93,7 +119,7 @@ public final class DebateOrchestrator: Sendable {
                     workspacePath: session.workspacePath,
                     toolsEnabled: session.hasFullCLITools
                 )
-            let resp = try await runner.call(ModelCallRequest(
+            let resp = try await callModel(ModelCallRequest(
                 provider: moderator.provider,
                 modelID: moderator.modelID,
                 effort: moderator.effort,
@@ -103,7 +129,7 @@ public final class DebateOrchestrator: Sendable {
                 toolPhase: researchPhase(for: session),
                 workspacePath: session.workspacePath,
                 openRouterAPIKey: openRouterKey
-            ))
+            ), in: session)
 
             if let json = JSONExtractor.parseObject(resp.rawText) {
                 if let newTitle = (json["session_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -332,7 +358,7 @@ public final class DebateOrchestrator: Sendable {
             ))
             await onEvent(.sessionUpdated(session))
 
-            let blueprintResp = try await runner.call(ModelCallRequest(
+            let blueprintResp = try await callModel(ModelCallRequest(
                 provider: moderator.provider,
                 modelID: moderator.modelID,
                 effort: moderator.effort,
@@ -347,7 +373,7 @@ public final class DebateOrchestrator: Sendable {
                 toolPhase: .researchAndInspect,
                 workspacePath: targetFolder,
                 openRouterAPIKey: openRouterKey
-            ))
+            ), in: session)
             let decomposed = parseVerdict(raw: blueprintResp.rawText, moderator: moderator, debaters: debaters)
             if let newAssignments = decomposed.executionAssignments, !newAssignments.isEmpty {
                 assignments = newAssignments
@@ -362,7 +388,7 @@ public final class DebateOrchestrator: Sendable {
             let combinedSteps = verdict.actionSteps.isEmpty
                 ? verdict.recommendation
                 : verdict.actionSteps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-            let defaultExecutor = selectPrimaryBuilder(from: debaters, excluding: nil, fallback: moderator)
+            let defaultExecutor = selectPrimaryBuilder(from: debaters, excluding: nil, fallback: moderator, forTask: combinedSteps)
             assignments = [
                 ExecutionAssignment(
                     assignedPersonaName: defaultExecutor.name,
@@ -421,7 +447,7 @@ public final class DebateOrchestrator: Sendable {
         await onEvent(.sessionUpdated(session))
 
         let qaContext = buildTranscriptContext(for: session)
-        let qaResp = try await runner.call(ModelCallRequest(
+        let qaResp = try await callModel(ModelCallRequest(
             provider: verifier.provider,
             modelID: verifier.modelID,
             effort: verifier.effort,
@@ -435,7 +461,7 @@ public final class DebateOrchestrator: Sendable {
             toolPhase: .coordinatedReadWrite,
             workspacePath: targetFolder,
             openRouterAPIKey: openRouterKey
-        ))
+        ), in: session)
 
         let qaJSON = JSONExtractor.parseObject(qaResp.rawText)
         var verificationPassed = (qaJSON?["verification_passed"] as? Bool) ?? true
@@ -470,7 +496,12 @@ public final class DebateOrchestrator: Sendable {
         // --- AUTOMATED FIX PASS IF QA CAUGHT ISSUES ---
         if !verificationPassed && !issuesFound.isEmpty {
             try Task.checkCancellation()
-            let fixer = selectPrimaryBuilder(from: debaters, excluding: verifier, fallback: moderator)
+            let fixer = selectPrimaryBuilder(
+                from: debaters,
+                excluding: verifier,
+                fallback: moderator,
+                forTask: issuesFound.joined(separator: " ")
+            )
             session.stage = .executingPlan
             await onEvent(.activeThinkersChanged(
                 [fixer.id],
@@ -478,7 +509,7 @@ public final class DebateOrchestrator: Sendable {
             ))
             await onEvent(.sessionUpdated(session))
 
-            let fixResp = try await runner.call(ModelCallRequest(
+            let fixResp = try await callModel(ModelCallRequest(
                 provider: fixer.provider,
                 modelID: fixer.modelID,
                 effort: fixer.effort,
@@ -494,7 +525,7 @@ public final class DebateOrchestrator: Sendable {
                 toolPhase: .coordinatedReadWrite,
                 workspacePath: targetFolder,
                 openRouterAPIKey: openRouterKey
-            ))
+            ), in: session)
 
             if let fixJSON = JSONExtractor.parseObject(fixResp.rawText) {
                 verificationPassed = (fixJSON["verification_passed"] as? Bool) ?? true
@@ -562,7 +593,7 @@ public final class DebateOrchestrator: Sendable {
                 ))
                 await onEvent(.sessionUpdated(session))
 
-                let auditResp = try await runner.call(ModelCallRequest(
+                let auditResp = try await callModel(ModelCallRequest(
                     provider: reviewer.provider,
                     modelID: reviewer.modelID,
                     effort: reviewer.effort,
@@ -578,7 +609,7 @@ public final class DebateOrchestrator: Sendable {
                     toolPhase: .researchAndInspect,
                     workspacePath: targetFolder,
                     openRouterAPIKey: openRouterKey
-                ))
+                ), in: session)
 
                 let auditJSON = JSONExtractor.parseObject(auditResp.rawText)
                 let missingItems = (auditJSON?["missing_items"] as? [String])?
@@ -656,7 +687,7 @@ public final class DebateOrchestrator: Sendable {
                 ))
                 await onEvent(.sessionUpdated(session))
 
-                let remPlanResp = try await runner.call(ModelCallRequest(
+                let remPlanResp = try await callModel(ModelCallRequest(
                     provider: moderator.provider,
                     modelID: moderator.modelID,
                     effort: moderator.effort,
@@ -673,7 +704,7 @@ public final class DebateOrchestrator: Sendable {
                     toolPhase: .researchAndInspect,
                     workspacePath: targetFolder,
                     openRouterAPIKey: openRouterKey
-                ))
+                ), in: session)
 
                 let remPlanTurn = parseDebateTurn(
                     raw: remPlanResp.rawText,
@@ -712,8 +743,8 @@ public final class DebateOrchestrator: Sendable {
                     }
                 }
                 if remAssignments.isEmpty {
-                    let defaultBuilder = selectPrimaryBuilder(from: debaters, excluding: reviewer, fallback: moderator)
                     let joinedMissing = missingItems.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+                    let defaultBuilder = selectPrimaryBuilder(from: debaters, excluding: reviewer, fallback: moderator, forTask: joinedMissing)
                     remAssignments = [
                         ExecutionAssignment(
                             assignedPersonaName: defaultBuilder.name,
@@ -848,7 +879,7 @@ public final class DebateOrchestrator: Sendable {
         ))
         await onEvent(.sessionUpdated(session))
 
-        let blueprintResp = try await runner.call(ModelCallRequest(
+        let blueprintResp = try await callModel(ModelCallRequest(
             provider: moderator.provider,
             modelID: moderator.modelID,
             effort: moderator.effort,
@@ -862,7 +893,7 @@ public final class DebateOrchestrator: Sendable {
             toolPhase: .researchAndInspect,
             workspacePath: targetFolder,
             openRouterAPIKey: openRouterKey
-        ))
+        ), in: session)
 
         var blueprint = parseVerdict(raw: blueprintResp.rawText, moderator: moderator, debaters: debaters)
         blueprint.shouldAutoExecute = true
@@ -898,6 +929,7 @@ public final class DebateOrchestrator: Sendable {
         openRouterKey: String?
     ) async throws -> ([DebateTurn], [String]) {
         let webOn = session.allowWebSearch
+        let attachedImages = Self.activeImagePaths(in: session)
         return try await withThrowingTaskGroup(of: (Int, String, Result<DebateTurn, Error>).self) { group in
             for (index, debater) in debaters.enumerated() {
                 let modelLabel = modelLabels[debater.modelID] ?? debater.modelID
@@ -913,6 +945,7 @@ public final class DebateOrchestrator: Sendable {
                                 workspacePath: targetFolder
                             ),
                             userPrompt: transcriptContext,
+                            imagePaths: attachedImages,
                             allowWebSearch: webOn,
                             toolPhase: .researchAndInspect,
                             workspacePath: targetFolder,
@@ -970,8 +1003,21 @@ public final class DebateOrchestrator: Sendable {
         return debaters.last ?? fallback
     }
 
-    private func selectPrimaryBuilder(from debaters: [Persona], excluding: Persona?, fallback: Persona) -> Persona {
+    public func selectPrimaryBuilder(
+        from debaters: [Persona],
+        excluding: Persona?,
+        fallback: Persona,
+        forTask taskText: String = ""
+    ) -> Persona {
         let candidates = debaters.filter { $0.id != excluding?.id }
+        // 1. Honor explicit user/roster task specialties & routing signals first!
+        if !taskText.isEmpty {
+            let scored = candidates.map { ($0, $0.domainAffinityScore(for: taskText)) }
+            if let best = scored.max(by: { $0.1 < $1.1 }), best.1 > 0 {
+                return best.0
+            }
+        }
+        // 2. Otherwise default to the primary systems/pragmatist builder
         if let builder = candidates.first(where: {
             $0.name.localizedCaseInsensitiveContains("Forge")
             || $0.name.localizedCaseInsensitiveContains("Marcus")
@@ -1148,7 +1194,12 @@ public final class DebateOrchestrator: Sendable {
                 let exec = allCouncil.first {
                     $0.name.localizedCaseInsensitiveContains(item.assignedPersonaName)
                     || item.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
-                } ?? selectPrimaryBuilder(from: debaters, excluding: excludingBuilder, fallback: moderator)
+                } ?? selectPrimaryBuilder(
+                    from: debaters,
+                    excluding: excludingBuilder,
+                    fallback: moderator,
+                    forTask: "\(item.taskInstruction) \(item.targetScope)"
+                )
                 return (idx, resolvedItem, exec)
             }
 
@@ -1164,6 +1215,7 @@ public final class DebateOrchestrator: Sendable {
             await onEvent(.activeThinkersChanged(Set(remainingByIndex.values.map(\.id)), statusLabel: initialStatus))
 
             let waveContext = buildTranscriptContext(for: session)
+            let waveImages = Self.activeImagePaths(in: session)
             let roundNum = remediationPassIndex.map { 110 + $0 } ?? 98
 
             var waveSuccessCount = 0
@@ -1214,6 +1266,7 @@ public final class DebateOrchestrator: Sendable {
                                 effort: entry.executor.effort,
                                 systemPrompt: sysPrompt,
                                 userPrompt: waveContext,
+                                imagePaths: waveImages,
                                 allowWebSearch: webOn,
                                 toolPhase: .coordinatedReadWrite,
                                 workspacePath: targetFolder,
@@ -1326,7 +1379,7 @@ public final class DebateOrchestrator: Sendable {
         STRUCTURED DRAFT HANDOFF:
         \(baseHandoff)
         """
-        let resp = try await runner.call(ModelCallRequest(
+        let resp = try await callModel(ModelCallRequest(
             provider: moderator.provider,
             modelID: moderator.modelID,
             effort: .medium,
@@ -1336,7 +1389,7 @@ public final class DebateOrchestrator: Sendable {
             toolPhase: .closedBook,
             workspacePath: session.workspacePath,
             openRouterAPIKey: openRouterKey
-        ))
+        ), in: session)
         return resp.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -1412,7 +1465,7 @@ public final class DebateOrchestrator: Sendable {
             try Task.checkCancellation()
             await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is framing the clash on the floor…"))
             let r1Board = buildTranscriptContext(for: session)
-            if let chairResp = try? await runner.call(ModelCallRequest(
+            if let chairResp = try? await callModel(ModelCallRequest(
                 provider: moderator.provider,
                 modelID: moderator.modelID,
                 effort: .medium,
@@ -1422,7 +1475,7 @@ public final class DebateOrchestrator: Sendable {
                 toolPhase: .closedBook,
                 workspacePath: session.workspacePath,
                 openRouterAPIKey: openRouterKey
-            )) {
+            ), in: session) {
                 let chairTurn = parseDebateTurn(
                     raw: chairResp.rawText,
                     durationMs: chairResp.durationMs,
@@ -1493,7 +1546,7 @@ public final class DebateOrchestrator: Sendable {
                 let liveBoard = buildTranscriptContext(for: session)
                 let resp: ModelCallResponse
                 do {
-                    resp = try await runner.call(ModelCallRequest(
+                    resp = try await callModel(ModelCallRequest(
                         provider: debater.provider,
                         modelID: debater.modelID,
                         effort: debater.effort,
@@ -1512,7 +1565,7 @@ public final class DebateOrchestrator: Sendable {
                         toolPhase: researchPhase(for: session),
                         workspacePath: session.workspacePath,
                         openRouterAPIKey: openRouterKey
-                    ))
+                    ), in: session)
                 } catch {
                     if Task.isCancelled { throw ModelRunnerError.cancelled }
                     if case ModelRunnerError.cancelled = error { throw error }
@@ -1558,7 +1611,7 @@ public final class DebateOrchestrator: Sendable {
                     ))
 
                     let replyBoard = buildTranscriptContext(for: session)
-                    let replyResp = try await runner.call(ModelCallRequest(
+                    let replyResp = try await callModel(ModelCallRequest(
                         provider: challengedPeer.provider,
                         modelID: challengedPeer.modelID,
                         effort: challengedPeer.effort,
@@ -1574,7 +1627,7 @@ public final class DebateOrchestrator: Sendable {
                         toolPhase: researchPhase(for: session),
                         workspacePath: session.workspacePath,
                         openRouterAPIKey: openRouterKey
-                    ))
+                    ), in: session)
 
                     let replyTurn = parseDebateTurn(
                         raw: replyResp.rawText,
@@ -1612,7 +1665,7 @@ public final class DebateOrchestrator: Sendable {
                     statusLabel: "\(moderator.name) is checking consensus & mediating Round \(roundNum)…"
                 ))
                 let board = buildTranscriptContext(for: session)
-                if let medResp = try? await runner.call(ModelCallRequest(
+                if let medResp = try? await callModel(ModelCallRequest(
                     provider: moderator.provider,
                     modelID: moderator.modelID,
                     effort: .medium,
@@ -1626,7 +1679,7 @@ public final class DebateOrchestrator: Sendable {
                     toolPhase: .closedBook,
                     workspacePath: session.workspacePath,
                     openRouterAPIKey: openRouterKey
-                )) {
+                ), in: session) {
                     let medJSON = JSONExtractor.parseObject(medResp.rawText)
                     let consensusReached = (medJSON?["consensus_reached"] as? Bool) ?? false
                     let medTurn = parseDebateTurn(
@@ -1661,7 +1714,7 @@ public final class DebateOrchestrator: Sendable {
         await onEvent(.sessionUpdated(session))
 
         let fullTranscript = buildTranscriptContext(for: session)
-        let verdictResp = try await runner.call(ModelCallRequest(
+        let verdictResp = try await callModel(ModelCallRequest(
             provider: moderator.provider,
             modelID: moderator.modelID,
             effort: moderator.effort,
@@ -1675,7 +1728,7 @@ public final class DebateOrchestrator: Sendable {
             toolPhase: researchPhase(for: session),
             workspacePath: session.workspacePath,
             openRouterAPIKey: openRouterKey
-        ))
+        ), in: session)
 
         let verdict = parseVerdict(raw: verdictResp.rawText, moderator: moderator, debaters: debaters)
         session.entries.append(.verdict(verdict))
@@ -1722,6 +1775,7 @@ public final class DebateOrchestrator: Sendable {
         let ws = session.workspacePath
         let toolsOn = session.hasFullCLITools
         let webOn = session.allowWebSearch
+        let attachedImages = Self.activeImagePaths(in: session)
 
         return try await withThrowingTaskGroup(of: (Int, String, Result<DebateTurn, Error>).self) { group in
             for (index, debater) in debaters.enumerated() {
@@ -1739,6 +1793,7 @@ public final class DebateOrchestrator: Sendable {
                                 toolsEnabled: toolsOn
                             ),
                             userPrompt: transcriptContext,
+                            imagePaths: attachedImages,
                             allowWebSearch: webOn,
                             toolPhase: phase,
                             workspacePath: ws,
@@ -1804,7 +1859,7 @@ public final class DebateOrchestrator: Sendable {
         // Since only ONE persona is running here, they safely hold the single-agent write lock if CLI tools are enabled
         let phase: ToolExecutionPhase = session.hasFullCLITools ? .coordinatedReadWrite : .closedBook
         let context = buildTranscriptContext(for: session)
-        let resp = try await runner.call(ModelCallRequest(
+        let resp = try await callModel(ModelCallRequest(
             provider: target.provider,
             modelID: target.modelID,
             effort: target.effort,
@@ -1820,7 +1875,7 @@ public final class DebateOrchestrator: Sendable {
             toolPhase: phase,
             workspacePath: session.workspacePath,
             openRouterAPIKey: openRouterKey
-        ))
+        ), in: session)
         let turn = parseDebateTurn(
             raw: resp.rawText,
             durationMs: resp.durationMs,
@@ -2065,7 +2120,13 @@ public final class DebateOrchestrator: Sendable {
         for entry in session.entries {
             switch entry {
             case .userPrompt(let msg):
-                sections.append("USER PROMPT:\n\(msg.text)")
+                var uBlock = "USER PROMPT:\n\(msg.text)"
+                if !msg.imageAttachments.isEmpty {
+                    uBlock += "\nATTACHED USER IMAGE(S):\n" + msg.imageAttachments.map {
+                        "- [\($0.displayName)] \($0.filePath)"
+                    }.joined(separator: "\n")
+                }
+                sections.append(uBlock)
             case .interview(let ex):
                 if ex.wasSkipped {
                     sections.append("CLARIFYING INTERVIEW: User asked the panel to make reasonable assumptions and debate open forks directly.")

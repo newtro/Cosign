@@ -57,6 +57,7 @@ public enum DefaultRoster {
                 debateStyle: """
                 Direct, grounded, occasionally dry-humored. Calls out complexity bloat by name and proposes the 20% move that delivers 80% of the payoff.
                 """,
+                taskSpecialties: [PersonaSpecialty.systemsAndBackend, PersonaSpecialty.toolingAndScripts],
                 accentHex: "#34D399",
                 avatarSymbol: "hammer.fill",
                 voicePresetID: "marcus",
@@ -78,6 +79,7 @@ public enum DefaultRoster {
                 debateStyle: """
                 Wry, surgical, spirited contrarian. Allergic to hand-waving and buzzwords; asks uncomfortable questions and refuses to co-sign weak compromises.
                 """,
+                taskSpecialties: [PersonaSpecialty.testsAndQA],
                 accentHex: "#F43F5E",
                 avatarSymbol: "flame.fill",
                 voicePresetID: "sable",
@@ -99,6 +101,8 @@ public enum DefaultRoster {
                 debateStyle: """
                 Energetic, curious, vivid storyteller. Uses crisp analogies, challenges incrementalism when a bolder move is simpler, and sparks fresh directions.
                 """,
+                taskSpecialties: [PersonaSpecialty.writingAndCopy, PersonaSpecialty.creativeAndDesign],
+                routingSignal: "Choose for writing text, narrative, dialogue, pitches, and creative copy.",
                 accentHex: "#60A5FA",
                 avatarSymbol: "sparkles",
                 voicePresetID: "orion",
@@ -120,6 +124,7 @@ public enum DefaultRoster {
                 debateStyle: """
                 Expressive, concrete, walks through real user moments step by step and advocates fiercely for simplicity and polish.
                 """,
+                taskSpecialties: [PersonaSpecialty.frontendAndUI, PersonaSpecialty.visualPolish],
                 accentHex: "#C084FC",
                 avatarSymbol: "paintbrush.pointed.fill",
                 voicePresetID: "lyra",
@@ -184,6 +189,7 @@ public enum DefaultRoster {
                 debateStyle: """
                 No-nonsense, practical builder. Speaks in exact functions, structs, files, and shell commands rather than abstract theory.
                 """,
+                taskSpecialties: [PersonaSpecialty.systemsAndBackend, PersonaSpecialty.toolingAndScripts],
                 accentHex: "#34D399",
                 avatarSymbol: "hammer.fill",
                 voicePresetID: "marcus",
@@ -205,6 +211,8 @@ public enum DefaultRoster {
                 debateStyle: """
                 Energetic, constructive, detail-attentive builder who bridges backend plumbing and real human workflows.
                 """,
+                taskSpecialties: [PersonaSpecialty.frontendAndUI, PersonaSpecialty.writingAndCopy],
+                routingSignal: "Choose for frontend/UI features and writing text, onboarding copy, dialogue, and documentation.",
                 accentHex: "#FB923C",
                 avatarSymbol: "lightbulb.max.fill",
                 voicePresetID: "ember",
@@ -226,6 +234,7 @@ public enum DefaultRoster {
                 debateStyle: """
                 Sharp, empirical, evidence-first reviewer. Cites exact test counts, exit codes, and edge cases verified.
                 """,
+                taskSpecialties: [PersonaSpecialty.testsAndQA],
                 accentHex: "#F43F5E",
                 avatarSymbol: "bolt.shield.fill",
                 voicePresetID: "sable",
@@ -247,6 +256,7 @@ public enum DefaultRoster {
                 debateStyle: """
                 Forensic, receipt-driven, zero-fluff inspector. Never applaud effort; audit outcomes on disk. Call out exact unwired files, placeholders, missing features, and spec gaps by path, reject weak excuses like "left for Phase 2," and hand a surgical punch-list back to the Chair until every requirement is solved.
                 """,
+                taskSpecialties: [PersonaSpecialty.testsAndQA, PersonaSpecialty.visualPolish],
                 accentHex: "#A3E635",
                 avatarSymbol: "eyeglasses",
                 voicePresetID: "kael",

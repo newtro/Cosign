@@ -226,7 +226,10 @@ struct CouncilStageHeader: View {
                 isSpeaking: model.voiceEngine.activeItem?.persona.id == moderator.id && model.voiceEngine.isPlaying,
                 speakerLevel: model.voiceEngine.speakerLevel,
                 latestStance: latestStance(for: moderator.id, in: session),
-                expandToFill: expandToFill
+                expandToFill: expandToFill,
+                onToggleSpecialty: { spec in
+                    model.togglePersonaSpecialty(personaID: moderator.id, specialty: spec)
+                }
             ) {
                 model.openStudio(for: moderator.id)
             }
@@ -246,7 +249,10 @@ struct CouncilStageHeader: View {
                     isSpeaking: model.voiceEngine.activeItem?.persona.id == debater.id && model.voiceEngine.isPlaying,
                     speakerLevel: model.voiceEngine.speakerLevel,
                     latestStance: latestStance(for: debater.id, in: session),
-                    expandToFill: expandToFill
+                    expandToFill: expandToFill,
+                    onToggleSpecialty: { spec in
+                        model.togglePersonaSpecialty(personaID: debater.id, specialty: spec)
+                    }
                 ) {
                     model.openStudio(for: debater.id)
                 }
@@ -267,7 +273,10 @@ struct CouncilStageHeader: View {
                     isSpeaking: model.voiceEngine.activeItem?.persona.id == auditor.id && model.voiceEngine.isPlaying,
                     speakerLevel: model.voiceEngine.speakerLevel,
                     latestStance: latestStance(for: auditor.id, in: session),
-                    expandToFill: expandToFill
+                    expandToFill: expandToFill,
+                    onToggleSpecialty: { spec in
+                        model.togglePersonaSpecialty(personaID: auditor.id, specialty: spec)
+                    }
                 ) {
                     model.openStudio(for: auditor.id)
                 }
@@ -289,6 +298,7 @@ struct CouncilSeatCard: View {
     let speakerLevel: CGFloat
     let latestStance: StanceKind?
     var expandToFill: Bool = false
+    var onToggleSpecialty: ((String) -> Void)? = nil
     let onTap: () -> Void
 
     @State private var hovering = false
@@ -379,6 +389,19 @@ struct CouncilSeatCard: View {
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(StudioTheme.inkMuted)
                             .lineLimit(1)
+
+                        if let topSpec = persona.activeSpecialties.first {
+                            Text("·")
+                                .font(.system(size: 10))
+                                .foregroundStyle(StudioTheme.inkMuted)
+                            Image(systemName: PersonaSpecialty.symbol(for: topSpec))
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(accent.opacity(0.92))
+                            Text(shortSpecialtyLabel(topSpec))
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(accent.opacity(0.92))
+                                .lineLimit(1)
+                        }
                     }
                 }
 
@@ -403,7 +426,50 @@ struct CouncilSeatCard: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("Click to customize \(persona.name)'s model, personality, or voice")
+        .contextMenu {
+            if let onToggleSpecialty {
+                Section("Choose \(persona.name) For… (Task Routing Signals)") {
+                    ForEach(PersonaSpecialty.presets) { spec in
+                        let active = persona.activeSpecialties.contains { $0.caseInsensitiveCompare(spec.label) == .orderedSame }
+                        Button {
+                            onToggleSpecialty(spec.label)
+                        } label: {
+                            Label(
+                                active ? "✓ \(spec.label)" : spec.label,
+                                systemImage: spec.symbolName
+                            )
+                        }
+                    }
+                }
+                Divider()
+            }
+            Button {
+                onTap()
+            } label: {
+                Label("Customize \(persona.name) in Persona Studio…", systemImage: "slider.horizontal.3")
+            }
+        }
+        .help(seatHelpTooltip)
+    }
+
+    private var seatHelpTooltip: String {
+        if let routing = persona.routingDescription {
+            return "\(persona.name) — \(routing)\nClick to open Persona Studio, or right-click to toggle task specialties."
+        }
+        return "Click to customize \(persona.name)'s model, routing specialties, personality, or voice (right-click for quick specialty toggles)"
+    }
+
+    private func shortSpecialtyLabel(_ raw: String) -> String {
+        switch raw {
+        case PersonaSpecialty.writingAndCopy: return "Writing"
+        case PersonaSpecialty.frontendAndUI: return "UI"
+        case PersonaSpecialty.systemsAndBackend: return "Systems"
+        case PersonaSpecialty.testsAndQA: return "QA"
+        case PersonaSpecialty.creativeAndDesign: return "Creative"
+        case PersonaSpecialty.toolingAndScripts: return "Tooling"
+        case PersonaSpecialty.visualPolish: return "Visual AAA"
+        default: return raw
+        }
     }
 
     private func shortModelName(_ raw: String) -> String {

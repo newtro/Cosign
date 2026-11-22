@@ -62,6 +62,11 @@ struct CosignApp: App {
 
                 Divider()
 
+                Button("Attach Image(s)…") {
+                    model.attachImagesWithOpenPanel()
+                }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+
                 Button("Scroll to Bottom") {
                     NotificationCenter.default.post(name: .cosignScrollToBottom, object: nil)
                 }
@@ -256,13 +261,16 @@ struct CosignRootView: View {
                 BuildLaunchSheet(model: model, session: session, verdict: verdict)
             }
         }
+        .sheet(item: $model.activePreviewAttachment) { attachment in
+            ImageAttachmentLightboxSheet(attachment: attachment)
+        }
     }
 
     @ViewBuilder
     private func timelineEntryView(_ entry: TimelineEntry) -> some View {
         switch entry {
         case .userPrompt(let msg):
-            UserPromptCardView(message: msg)
+            UserPromptCardView(model: model, message: msg)
         case .interview(let exchange):
             InterviewExchangeCardView(model: model, exchange: exchange)
         case .roundBanner(let banner):

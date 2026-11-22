@@ -380,20 +380,35 @@ public enum DebatePrompts {
         }
     }
 
+    public static func specialistRoutingBlock(_ personas: [Persona]) -> String {
+        let lines = personas.map { p -> String in
+            let modelNote = "\(p.provider.shortName) · \(p.modelID)"
+            if let routing = p.routingDescription {
+                return "- \(p.name) (\(p.title) · \(modelNote)) — \(routing)"
+            } else {
+                return "- \(p.name) (\(p.title) · \(modelNote)): \(p.tagline)"
+            }
+        }.joined(separator: "\n")
+
+        return """
+        SPECIALIST CAPABILITIES & ROUTING SIGNALS (HONOR THESE WHEN ROUTING WORK):
+        \(lines)
+        - ROUTING RULE: Whenever any slice of the task matches a persona's `PREFERRED FOR` specialties or routing signal (for example, writing text, prose, narrative, dialogue, UI microcopy, or docs when a persona is signaled for `Writing & Copy` or text writing), split that slice into its own parallel workstream and assign (`assigned_to`) it specifically to that signaled persona!
+        """
+    }
+
     public static func intakeSystemPrompt(
         moderator: Persona,
         debaters: [Persona],
         workspacePath: String?,
         toolsEnabled: Bool
     ) -> String {
-        let rosterDesc = debaters.map { "- \($0.name) (\($0.title)): \($0.tagline)" }.joined(separator: "\n")
         return """
         You are \(moderator.name), \(moderator.title), chairing the Cosign council.
         Personality: \(moderator.personality)
         Style: \(moderator.debateStyle)
 
-        Seated debaters in the room:
-        \(rosterDesc)
+        \(specialistRoutingBlock(debaters))
 
         \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: toolsEnabled, allowWrites: false))
 
@@ -605,6 +620,8 @@ public enum DebatePrompts {
         Personality: \(moderator.personality)
         Style: \(moderator.debateStyle)
 
+        \(specialistRoutingBlock([moderator] + debaters))
+
         YOUR TASK — CO-SIGNED VERDICT & COORDINATED EXECUTION PLAN:
         1. Deliver a decisive, concrete `recommendation` integrating what survived the debate, plus `action_steps`, `key_tradeoffs`, `cosigned_by`, and any holdout `dissents`.
         2. COORDINATING PARALLEL EXECUTION WAVES:
@@ -731,14 +748,12 @@ public enum DebatePrompts {
         debaters: [Persona],
         workspacePath: String?
     ) -> String {
-        let rosterDesc = debaters.map { "- \($0.name) (\($0.title)): \($0.tagline)" }.joined(separator: "\n")
         return """
         You are \(moderator.name), \(moderator.title), chairing the Cosign council in **BUILD MODE** inside target folder: \(workspacePath ?? "current workspace").
         Personality: \(moderator.personality)
         Style: \(moderator.debateStyle)
 
-        Seated council specialists:
-        \(rosterDesc)
+        \(specialistRoutingBlock(debaters))
 
         \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
 
@@ -810,11 +825,14 @@ public enum DebatePrompts {
         You are \(moderator.name), \(moderator.title), orchestrating **BUILD MODE** in `\(workspacePath ?? ".")` across the council (\(roster)).
         Personality: \(moderator.personality)
 
+        \(specialistRoutingBlock([moderator] + debaters))
+
         \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
         \(extraBlock)
         YOUR TASK — CONCRETE MULTI-AGENT PARALLEL BUILD BLUEPRINT:
         Synthesize the agreed architecture (or prior Debate Verdict) into an actionable Build Blueprint with **2 to 6 scoped `execution_assignments`** organized into **Parallel Execution Waves (`"wave": 1`, `"wave": 2`, ...)** inside `\(workspacePath ?? ".")`:
-        - **MAXIMIZE PARALLELISM WHERE SAFE**: Assign the **SAME `"wave"` number** (starting at `"wave": 1`) to every persona whose `target_scope` files/subdirectories do NOT overlap and can be built simultaneously! For example, in Wave 1: one specialist builds backend/core systems (`Server/` or `Core/`), while a second specialist simultaneously builds frontend/UI/prefabs (`Client/` or `UI/`), while a third builds test harnesses/fixtures (`Tests/`)—and each persona can also spawn its own sub-agents inside its scope!
+        - **HONOR SPECIALIST ROUTING SIGNALS**: Assign each slice (`assigned_to`) to the persona whose `PREFERRED FOR` specialties or routing signal best fit that slice! In particular, if any persona is signaled for writing text / `Writing & Copy` and the work involves prose, narrative, dialogue, onboarding copy, READMEs, or pitch text, carve those text/copy files into their own parallel workstream assigned directly to that persona!
+        - **MAXIMIZE PARALLELISM WHERE SAFE**: Assign the **SAME `"wave"` number** (starting at `"wave": 1`) to every persona whose `target_scope` files/subdirectories do NOT overlap and can be built simultaneously! For example, in Wave 1: one specialist builds backend/core systems (`Server/` or `Core/`), while a second specialist simultaneously builds frontend/UI/prefabs (`Client/` or `UI/`), while a third writes text/docs or test harnesses (`Docs/` or `Tests/`)—and each persona can also spawn its own sub-agents inside its scope!
         - Advance to `"wave": 2` (or `"wave": 3`) ONLY when a task genuinely depends on Wave 1's created files (such as final cross-module integration wiring or end-to-end packaging) or touches a shared file.
         - Give every assignment an explicit, non-overlapping `target_scope` (exact file paths or subdirectory prefixes) and crisp interface contracts so parallel Wave-1 builders integrate cleanly!
         - Set `should_auto_execute` to `true`.
@@ -981,6 +999,8 @@ public enum DebatePrompts {
         return """
         You are \(moderator.name), \(moderator.title), leading **COMPLETENESS REMEDIATION PASS \(iteration)** in `\(workspacePath ?? ".")` across (\(roster)).
         Personality: \(moderator.personality)
+
+        \(specialistRoutingBlock([moderator] + debaters))
 
         \(workspaceToolsBlock(workspacePath: workspacePath, toolsEnabled: true, allowWrites: false))
 

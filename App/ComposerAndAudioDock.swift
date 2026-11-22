@@ -1,6 +1,8 @@
+import AppKit
 import CosignCore
 import CosignVoice
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Empty-State Welcome & Inspiration Deck
 
@@ -222,7 +224,11 @@ struct StudioComposerDock: View {
     @FocusState.Binding var isInputFocused: Bool
     var onScrollToBottom: (() -> Void)? = nil
 
+    @State private var isDropTargeted: Bool = false
+    @State private var pasteMonitor: Any?
+
     var body: some View {
+        let pendingAttachments = model.currentPendingAttachments
         let hasPriorVerdict = session.entries.contains {
             if case .verdict = $0 { return true }
             return false
@@ -292,16 +298,81 @@ struct StudioComposerDock: View {
                 }
             }
 
-            // Main Prompt Input Row (Static NSTextField placeholder + SwiftUI overlay avoids AppKit IMKInputSession re-entrant RunLoop lockup!)
-            let placeholderText = session.entries.isEmpty
-                ? (session.activeMode == .build
-                    ? "Describe the project or feature for the council to build… (VoiceSmith ready)"
-                    : "Pitch an idea or question for the council… (VoiceSmith ready)")
-                : (session.activeMode == .build
-                    ? "Ask for the next feature, fix, or @mention a specialist…"
-                    : "Follow up, push back, or @mention a panelist…")
+            // Staged Image Attachments Strip (when screenshots/images are pasted, dropped, or picked)
+            if !pendingAttachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(pendingAttachments) { att in
+                            StagedImageThumbnailTile(
+                                attachment: att,
+                                onPreview: { model.activePreviewAttachment = att },
+                                onRemove: { model.removePendingAttachment(att.id) }
+                            )
+                        }
 
-            HStack(alignment: .bottom, spacing: 12) {
+                        if pendingAttachments.count < 8 {
+                            Button {
+                                model.attachImagesWithOpenPanel()
+                            } label: {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 13, weight: .semibold))
+                                    Text("Add")
+                                        .font(.system(size: 10, weight: .medium))
+                                }
+                                .foregroundStyle(StudioTheme.inkSecondary)
+                                .frame(width: 58, height: 58)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                        .fill(Color.white.opacity(0.04))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.11), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Attach another image")
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    .padding(.bottom, 2)
+                }
+            }
+
+            // Main Prompt Input Row (Static NSTextField placeholder + SwiftUI overlay avoids AppKit IMKInputSession re-entrant RunLoop lockup!)
+            let placeholderText = !pendingAttachments.isEmpty
+                ? "Add instructions for the attached image\(pendingAttachments.count == 1 ? "" : "s"), or press Return to send…"
+                : (session.entries.isEmpty
+                    ? (session.activeMode == .build
+                        ? "Describe what to build, or paste/drop a screenshot (⌘V)…"
+                        : "Pitch an idea or paste/drop an image for the council (⌘V)…")
+                    : (session.activeMode == .build
+                        ? "Ask for the next feature, fix, paste a screenshot (⌘V), or @mention…"
+                        : "Follow up, push back, paste an image (⌘V), or @mention…"))
+
+            HStack(alignment: .bottom, spacing: 10) {
+                Button {
+                    model.attachImagesWithOpenPanel()
+                } label: {
+                    Image(systemName: pendingAttachments.isEmpty ? "photo.badge.plus" : "photo.stack.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(pendingAttachments.isEmpty ? StudioTheme.inkSecondary : StudioTheme.emerald)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(pendingAttachments.isEmpty ? Color.white.opacity(0.05) : StudioTheme.emerald.opacity(0.16))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .strokeBorder(pendingAttachments.isEmpty ? Color.white.opacity(0.09) : StudioTheme.emerald.opacity(0.40), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(session.stage.isBusy)
+                .help("Attach image(s) or screenshots (or paste directly with ⌘V / drag & drop)")
+
                 ZStack(alignment: .topLeading) {
                     if draftText.isEmpty {
                         Text(placeholderText)
@@ -322,7 +393,8 @@ struct StudioComposerDock: View {
                             if press.modifiers.contains(.shift) {
                                 return .ignored
                             }
-                            if !session.stage.isBusy && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            let hasContent = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.currentPendingAttachments.isEmpty
+                            if !session.stage.isBusy && hasContent {
                                 let toSend = draftText
                                 draftText = ""
                                 model.sendPrompt(toSend)
@@ -350,7 +422,7 @@ struct StudioComposerDock: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    let canSend = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    let canSend = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
                     Button {
                         let toSend = draftText
                         draftText = ""
@@ -602,7 +674,7 @@ struct StudioComposerDock: View {
                     .help("Scroll straight to the bottom of the session (⌘J)")
                 }
 
-                if session.entries.isEmpty && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !session.stage.isBusy {
+                if session.entries.isEmpty && (!draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty) && !session.stage.isBusy {
                     Button {
                         let toSend = draftText
                         draftText = ""
@@ -614,7 +686,7 @@ struct StudioComposerDock: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text(session.activeMode == .build ? "⏎ Build  ·  ⇧⏎ New line" : "⏎ Convene  ·  ⇧⏎ New line")
+                    Text(session.activeMode == .build ? "⌘V Image  ·  ⏎ Build  ·  ⇧⏎ New line" : "⌘V Image  ·  ⏎ Convene  ·  ⇧⏎ New line")
                         .font(.system(size: 11))
                         .foregroundStyle(StudioTheme.inkMuted.opacity(0.75))
                 }
@@ -623,9 +695,149 @@ struct StudioComposerDock: View {
             .padding(.bottom, 11)
         }
         .frame(maxWidth: .infinity)
-        .studioCard(cornerRadius: 20, fill: StudioTheme.dockGlass)
+        .studioCard(
+            cornerRadius: 20,
+            fill: StudioTheme.dockGlass,
+            glowColor: isDropTargeted ? StudioTheme.emerald : nil,
+            glowIntensity: isDropTargeted ? 0.45 : 0.22
+        )
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(StudioTheme.emerald, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    .overlay(
+                        HStack(spacing: 7) {
+                            Image(systemName: "photo.badge.plus")
+                            Text("Drop image(s) to attach")
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(StudioTheme.emerald)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Color.black.opacity(0.82)))
+                    )
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted) { providers in
+            handleDroppedProviders(providers)
+        }
+        .onAppear {
+            installPasteMonitorIfNeeded()
+        }
+        .onDisappear {
+            if let pasteMonitor {
+                NSEvent.removeMonitor(pasteMonitor)
+                self.pasteMonitor = nil
+            }
+        }
         .padding(.bottom, 14)
         .padding(.top, 6)
+    }
+
+    private func installPasteMonitorIfNeeded() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "v" else {
+                return event
+            }
+            // Don't hijack ⌘V inside modal sheets (Persona Studio, Settings, Handoff, etc.)
+            guard !model.showingPersonaStudio,
+                  model.activeHandoffVerdict == nil,
+                  model.activeBuildLaunchVerdict == nil,
+                  model.activePreviewAttachment == nil,
+                  NSApp.keyWindow?.attachedSheet == nil else {
+                return event
+            }
+            if let current = model.currentSession, !current.stage.isBusy,
+               model.attachImagesFromPasteboard(.general) {
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                handled = true
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    let resolvedURL: URL? = {
+                        if let data = item as? Data {
+                            return URL(dataRepresentation: data, relativeTo: nil)
+                        }
+                        if let url = item as? URL {
+                            return url
+                        }
+                        return nil
+                    }()
+                    if let url = resolvedURL {
+                        Task { @MainActor in
+                            _ = model.attachImagesFromURLs([url])
+                        }
+                    }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                handled = true
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    if let data {
+                        Task { @MainActor in
+                            _ = model.attachImageData(data, preferredName: "Dropped-Image")
+                        }
+                    }
+                }
+            }
+        }
+        return handled
+    }
+}
+
+private struct StagedImageThumbnailTile: View {
+    let attachment: ChatImageAttachment
+    let onPreview: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button(action: onPreview) {
+                Group {
+                    if let nsImg = NSImage(contentsOfFile: attachment.filePath) {
+                        Image(nsImage: nsImg)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        ZStack {
+                            Color.white.opacity(0.06)
+                            Image(systemName: "photo")
+                                .foregroundStyle(StudioTheme.inkMuted)
+                        }
+                    }
+                }
+                .frame(width: 58, height: 58)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(StudioTheme.emerald.opacity(0.42), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("\(attachment.displayName) — click to preview")
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.black.opacity(0.82))
+            }
+            .buttonStyle(.plain)
+            .offset(x: 5, y: -5)
+            .help("Remove image")
+        }
+        .padding(.top, 4)
+        .padding(.trailing, 4)
     }
 }
 

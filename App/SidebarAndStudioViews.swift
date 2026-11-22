@@ -301,6 +301,16 @@ struct PersonaStudioSheet: View {
                                             .font(.system(size: 10.5, design: .monospaced))
                                             .foregroundStyle(StudioTheme.inkMuted)
                                             .lineLimit(1)
+                                        if let topSpec = p.activeSpecialties.first {
+                                            HStack(spacing: 3) {
+                                                Image(systemName: PersonaSpecialty.symbol(for: topSpec))
+                                                    .font(.system(size: 8.5, weight: .bold))
+                                                Text(p.activeSpecialties.count > 1 ? "\(topSpec) +\(p.activeSpecialties.count - 1)" : topSpec)
+                                                    .font(.system(size: 9.5, weight: .semibold))
+                                                    .lineLimit(1)
+                                            }
+                                            .foregroundStyle(Color(hex: p.accentHex))
+                                        }
                                     }
                                     Spacer()
                                 }
@@ -522,6 +532,77 @@ struct PersonaStudioSheet: View {
                                     .frame(width: 185)
                                     .background(RoundedRectangle(cornerRadius: 7).fill(StudioTheme.drawerBg))
                             }
+                        }
+                        .padding(15)
+                        .studioCard(cornerRadius: 14, fill: StudioTheme.cardSurface)
+
+                        // Task Routing Signals ("Choose This Persona For…")
+                        VStack(alignment: .leading, spacing: 11) {
+                            HStack {
+                                studioLabel("TASK ROUTING SIGNALS · CHOOSE THIS PERSONA FOR…")
+                                Spacer()
+                                Text("Chair routes matching slices here")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(StudioTheme.inkMuted)
+                            }
+
+                            FlowLayout(spacing: 7, lineSpacing: 7) {
+                                let currentSpecs = draft.activeSpecialties
+                                ForEach(PersonaSpecialty.presets) { spec in
+                                    let isSelected = currentSpecs.contains(where: { $0.caseInsensitiveCompare(spec.label) == .orderedSame })
+                                    Button {
+                                        var updated = currentSpecs
+                                        if let idx = updated.firstIndex(where: { $0.caseInsensitiveCompare(spec.label) == .orderedSame }) {
+                                            updated.remove(at: idx)
+                                        } else {
+                                            updated.append(spec.label)
+                                        }
+                                        draft.taskSpecialties = updated.isEmpty ? nil : updated
+                                    } label: {
+                                        HStack(spacing: 5) {
+                                            Image(systemName: isSelected ? "checkmark.circle.fill" : spec.symbolName)
+                                                .font(.system(size: 10.5, weight: .semibold))
+                                            Text(spec.label)
+                                                .font(.system(size: 11.5, weight: .semibold))
+                                        }
+                                        .foregroundStyle(isSelected ? StudioTheme.inkPrimary : StudioTheme.inkSecondary)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5.5)
+                                        .background(
+                                            Capsule().fill(isSelected ? accent.opacity(0.26) : Color.white.opacity(0.045))
+                                        )
+                                        .overlay(
+                                            Capsule().strokeBorder(isSelected ? accent.opacity(0.65) : Color.white.opacity(0.09), lineWidth: 1)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+
+                            let customSignalBinding = Binding<String>(
+                                get: { draft.routingSignal ?? "" },
+                                set: { newVal in
+                                    draft.routingSignal = newVal.isEmpty ? nil : newVal
+                                }
+                            )
+                            ZStack(alignment: .topLeading) {
+                                if (draft.routingSignal ?? "").isEmpty {
+                                    Text("Optional custom routing note — e.g. \"Always pick this persona for writing text, dialogue, pitch copy, and docs\"")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(StudioTheme.inkMuted.opacity(0.75))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                        .allowsHitTesting(false)
+                                }
+                                TextField("", text: customSignalBinding, axis: .vertical)
+                                    .lineLimit(1...3)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(StudioTheme.inkPrimary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                            }
+                            .background(RoundedRectangle(cornerRadius: 9).fill(StudioTheme.drawerBg))
                         }
                         .padding(15)
                         .studioCard(cornerRadius: 14, fill: StudioTheme.cardSurface)

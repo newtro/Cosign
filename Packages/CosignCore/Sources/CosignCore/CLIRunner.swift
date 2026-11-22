@@ -6,6 +6,7 @@ public struct ModelCallRequest: Sendable {
     public var effort: ReasoningEffort
     public var systemPrompt: String
     public var userPrompt: String
+    public var imagePaths: [String]
     public var allowWebSearch: Bool
     public var toolPhase: ToolExecutionPhase
     public var workspacePath: String?
@@ -17,6 +18,7 @@ public struct ModelCallRequest: Sendable {
         effort: ReasoningEffort,
         systemPrompt: String,
         userPrompt: String,
+        imagePaths: [String] = [],
         allowWebSearch: Bool = true,
         toolPhase: ToolExecutionPhase = .researchAndInspect,
         workspacePath: String? = nil,
@@ -27,6 +29,7 @@ public struct ModelCallRequest: Sendable {
         self.effort = effort
         self.systemPrompt = systemPrompt
         self.userPrompt = userPrompt
+        self.imagePaths = imagePaths
         self.allowWebSearch = allowWebSearch
         self.toolPhase = toolPhase
         self.workspacePath = workspacePath
@@ -170,6 +173,9 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         let (cwd, shouldClean) = resolveWorkingDirectory(for: req)
         defer { if shouldClean { try? FileManager.default.removeItem(at: cwd) } }
 
+        let validImages = Self.existingImagePaths(from: req.imagePaths)
+        let imageDirs = Self.uniqueParentDirectories(for: validImages)
+
         var args: [String] = [
             "-p",
             "--model", effectiveModel,
@@ -181,16 +187,32 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
 
         switch req.toolPhase {
         case .closedBook:
-            let tools = req.allowWebSearch ? "WebSearch,WebFetch" : ""
-            args += [
-                "--system-prompt", req.systemPrompt,
-                "--tools", tools,
-                "--safe-mode",
-                "--setting-sources", "",
-                "--strict-mcp-config",
-            ]
-            if req.allowWebSearch {
-                args += ["--allowedTools", tools]
+            if validImages.isEmpty {
+                let tools = req.allowWebSearch ? "WebSearch,WebFetch" : ""
+                args += [
+                    "--system-prompt", req.systemPrompt,
+                    "--tools", tools,
+                    "--safe-mode",
+                    "--setting-sources", "",
+                    "--strict-mcp-config",
+                ]
+                if req.allowWebSearch {
+                    args += ["--allowedTools", tools]
+                }
+            } else {
+                // Allow Read on attached image directories so Claude visually inspects user-attached screenshots even in closed-book turns!
+                let tools = req.allowWebSearch ? "Read,WebSearch,WebFetch" : "Read"
+                args += [
+                    "--system-prompt", req.systemPrompt,
+                    "--tools", tools,
+                    "--allowedTools", tools,
+                    "--dangerously-skip-permissions",
+                    "--setting-sources", "",
+                    "--strict-mcp-config",
+                ]
+                for dir in imageDirs {
+                    args += ["--add-dir", dir]
+                }
             }
         case .researchAndInspect:
             // Use --append-system-prompt so Claude Code preserves its native built-in Agent/sub-agent & parallel tool orchestration!
@@ -203,6 +225,9 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
             for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
                 args += ["--add-dir", extra]
             }
+            for dir in imageDirs {
+                args += ["--add-dir", dir]
+            }
         case .coordinatedReadWrite:
             // Preserve Claude Code's built-in Agent/sub-agent harness so each builder can spawn sub-agents freely!
             args += [
@@ -213,6 +238,23 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
             for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
                 args += ["--add-dir", extra]
             }
+            for dir in imageDirs {
+                args += ["--add-dir", dir]
+            }
+        }
+
+        let claudeStdin: String
+        if validImages.isEmpty {
+            claudeStdin = req.userPrompt
+        } else {
+            let list = validImages.map { "- \($0)" }.joined(separator: "\n")
+            claudeStdin = """
+            IMPORTANT — USER ATTACHED IMAGE(S):
+            Call your `Read` tool on these attached image path(s) FIRST so you visually inspect them before answering:
+            \(list)
+
+            \(req.userPrompt)
+            """
         }
 
         let out: String
@@ -221,7 +263,7 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
                 executable: binary,
                 arguments: args,
                 cwd: cwd,
-                stdinText: req.userPrompt,
+                stdinText: claudeStdin,
                 label: "claude/\(effectiveModel)"
             )
         } catch let ModelRunnerError.processFailed(rawErr) {
@@ -277,6 +319,9 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
             fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read + write + shell access in \(cwd.path) AND full freedom to spawn your own sub-agents and parallel tool calls to divide & conquer your assigned scope rapidly. Stay strictly within your assigned file/directory scope so concurrent council teammates are never disrupted."
         }
 
+        let validImages = Self.existingImagePaths(from: req.imagePaths)
+        let imageDirs = Self.uniqueParentDirectories(for: validImages)
+
         let effortValue = req.effort == .max ? "xhigh" : req.effort.rawValue
         var args: [String] = []
         if req.toolPhase != .closedBook {
@@ -294,6 +339,9 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
             "-C", cwd.path,
             "-o", lastFile.path,
         ]
+        for imgPath in validImages {
+            args += ["-i", imgPath]
+        }
 
         switch req.toolPhase {
         case .closedBook:
@@ -302,6 +350,9 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
             args += ["--dangerously-bypass-approvals-and-sandbox"]
             for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
                 args += ["--add-dir", extra]
+            }
+            for dir in imageDirs {
+                args += ["--add-dir", dir]
             }
         }
         args.append("-")
@@ -330,10 +381,17 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         let (cwd, shouldClean) = resolveWorkingDirectory(for: req)
         defer { if shouldClean { try? FileManager.default.removeItem(at: cwd) } }
 
+        let validImages = Self.existingImagePaths(from: req.imagePaths)
+        let imageDirs = Self.uniqueParentDirectories(for: validImages)
+
         var fullPrompt = "\(req.systemPrompt)\n\n---\n\n\(req.userPrompt)"
+        if !validImages.isEmpty {
+            let list = validImages.map { "- \($0)" }.joined(separator: "\n")
+            fullPrompt += "\n\nIMPORTANT — USER ATTACHED IMAGE(S): Call `read_file` on these attached image path(s) FIRST so you visually inspect them before answering:\n\(list)"
+        }
         switch req.toolPhase {
         case .closedBook:
-            if !req.allowWebSearch {
+            if !req.allowWebSearch && validImages.isEmpty {
                 fullPrompt += "\n\nDo not use any tools, files, or web search for this reply."
             }
         case .researchAndInspect:
@@ -352,16 +410,29 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
 
         switch req.toolPhase {
         case .closedBook:
-            args += ["--mode", "plan"]
+            if validImages.isEmpty {
+                args += ["--mode", "plan"]
+            } else {
+                args += ["--dangerously-skip-permissions", "--mode", "plan"]
+                for dir in imageDirs {
+                    args += ["--add-dir", dir]
+                }
+            }
         case .researchAndInspect:
             args += ["--dangerously-skip-permissions", "--mode", "plan"]
             for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
                 args += ["--add-dir", extra]
             }
+            for dir in imageDirs {
+                args += ["--add-dir", dir]
+            }
         case .coordinatedReadWrite:
             args += ["--dangerously-skip-permissions", "--mode", "auto"]
             for extra in WorkspaceResolver.additionalRepoRoots(excluding: cwd.path, home: realHome) {
                 args += ["--add-dir", extra]
+            }
+            for dir in imageDirs {
+                args += ["--add-dir", dir]
             }
         }
 
@@ -396,12 +467,32 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         guard !key.isEmpty else {
             throw ModelRunnerError.missingAPIKey(.openrouter)
         }
+        let validImages = Self.existingImagePaths(from: req.imagePaths)
+        let userContent: Any
+        if validImages.isEmpty {
+            userContent = req.userPrompt
+        } else {
+            var parts: [[String: Any]] = [["type": "text", "text": req.userPrompt]]
+            for path in validImages {
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                    let ext = URL(fileURLWithPath: path).pathExtension
+                    let mime = SessionStore.mimeType(forExtension: ext)
+                    let dataURL = "data:\(mime);base64,\(data.base64EncodedString())"
+                    parts.append([
+                        "type": "image_url",
+                        "image_url": ["url": dataURL]
+                    ])
+                }
+            }
+            userContent = parts
+        }
+
         let model = req.modelID + (req.allowWebSearch ? ":online" : "")
         let body: [String: Any] = [
             "model": model,
             "messages": [
                 ["role": "system", "content": req.systemPrompt],
-                ["role": "user", "content": req.userPrompt],
+                ["role": "user", "content": userContent],
             ],
             "reasoning": ["effort": req.effort == .max || req.effort == .xhigh ? "high" : req.effort.rawValue]
         ]
@@ -428,6 +519,23 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
     }
 
     // MARK: - Clean Environment & Subprocess Execution
+
+    private static func existingImagePaths(from rawPaths: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for path in rawPaths where !path.isEmpty && !seen.contains(path) {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {
+                seen.insert(path)
+                result.append(path)
+            }
+        }
+        return result
+    }
+
+    private static func uniqueParentDirectories(for filePaths: [String]) -> [String] {
+        Array(Set(filePaths.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path })).sorted()
+    }
 
     private func makeTempDir(prefix: String) throws -> URL {
         let base = FileManager.default.temporaryDirectory

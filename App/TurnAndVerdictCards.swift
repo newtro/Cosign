@@ -6,12 +6,14 @@ import SwiftUI
 // MARK: - User Prompt Bubble
 
 struct UserPromptCardView: View {
+    @ObservedObject var model: AppModel
     let message: UserPromptMessage
 
     var body: some View {
+        let images = message.imageAttachments
         HStack {
             Spacer(minLength: 80)
-            VStack(alignment: .trailing, spacing: 6) {
+            VStack(alignment: .trailing, spacing: 8) {
                 HStack(spacing: 6) {
                     Text("YOU")
                         .font(.system(size: 10, weight: .heavy, design: .rounded))
@@ -21,29 +23,141 @@ struct UserPromptCardView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(StudioTheme.brassBright)
                 }
-                Text(message.text)
-                    .font(.system(size: 14.5, weight: .regular))
-                    .lineSpacing(4)
-                    .foregroundStyle(StudioTheme.inkPrimary)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color(hex: "#1C2438"), Color(hex: "#151B2B")],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
+
+                if !images.isEmpty {
+                    FlowLayout(spacing: 8, lineSpacing: 8) {
+                        ForEach(images) { att in
+                            Button {
+                                model.activePreviewAttachment = att
+                            } label: {
+                                Group {
+                                    if let nsImg = NSImage(contentsOfFile: att.filePath) {
+                                        Image(nsImage: nsImg)
+                                            .resizable()
+                                            .scaledToFill()
+                                    } else {
+                                        ZStack {
+                                            Color.white.opacity(0.05)
+                                            VStack(spacing: 4) {
+                                                Image(systemName: "photo")
+                                                Text(att.displayName)
+                                                    .font(.system(size: 10))
+                                                    .lineLimit(1)
+                                            }
+                                            .foregroundStyle(StudioTheme.inkMuted)
+                                            .padding(8)
+                                        }
+                                    }
+                                }
+                                .frame(width: images.count == 1 ? 220 : 140, height: images.count == 1 ? 148 : 104)
+                                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                        .strokeBorder(StudioTheme.brass.opacity(0.35), lineWidth: 1)
                                 )
-                            )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(StudioTheme.brass.opacity(0.28), lineWidth: 1)
-                    )
+                                .shadow(color: .black.opacity(0.30), radius: 8, y: 3)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button("Preview Full Size") {
+                                    model.activePreviewAttachment = att
+                                }
+                                Button("Reveal in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: att.filePath)])
+                                }
+                                Button("Copy Image") {
+                                    if let img = NSImage(contentsOfFile: att.filePath) {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.writeObjects([img])
+                                    }
+                                }
+                            }
+                            .help("\(att.displayName) — click to enlarge")
+                        }
+                    }
+                }
+
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .font(.system(size: 14.5, weight: .regular))
+                        .lineSpacing(4)
+                        .foregroundStyle(StudioTheme.inkPrimary)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color(hex: "#1C2438"), Color(hex: "#151B2B")],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(StudioTheme.brass.opacity(0.28), lineWidth: 1)
+                        )
+                }
             }
         }
+    }
+}
+
+struct ImageAttachmentLightboxSheet: View {
+    let attachment: ChatImageAttachment
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "photo.fill")
+                    .foregroundStyle(StudioTheme.emerald)
+                Text(attachment.displayName)
+                    .font(.system(size: 14.5, weight: .bold))
+                    .foregroundStyle(StudioTheme.inkPrimary)
+                if let w = attachment.widthPx, let h = attachment.heightPx {
+                    Text("\(w) × \(h)")
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(StudioTheme.inkMuted)
+                }
+                Spacer()
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: attachment.filePath)])
+                }
+                .buttonStyle(StudioPillButtonStyle(tint: StudioTheme.sky, active: true))
+
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                .buttonStyle(BrassPrimaryButtonStyle())
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 13)
+            .background(StudioTheme.sidebarBg)
+
+            Divider().overlay(Color.white.opacity(0.08))
+
+            ZStack {
+                Color.black.opacity(0.45)
+                if let nsImg = NSImage(contentsOfFile: attachment.filePath) {
+                    Image(nsImage: nsImg)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(20)
+                } else {
+                    Text("Image file not found at \(attachment.filePath)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(StudioTheme.inkSecondary)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 640, idealWidth: 920, maxWidth: .infinity, minHeight: 480, idealHeight: 680, maxHeight: .infinity)
+        .background(StudioTheme.canvasTop)
+        .preferredColorScheme(.dark)
     }
 }
 
