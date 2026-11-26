@@ -1080,4 +1080,408 @@ final class CosignCoreTests: XCTestCase {
             XCTFail("Expected userPrompt entry with image attachment")
         }
     }
+
+    func testAllSystemPromptsAndDefaultPersonasEnforcePlainLiteralLanguage() {
+        let personas = DefaultRoster.personas
+        let vera = personas.first { $0.id == DefaultRoster.veraID }!
+        let marcus = personas.first { $0.id == DefaultRoster.marcusID }!
+        let sable = personas.first { $0.id == DefaultRoster.sableID }!
+        let orion = personas.first { $0.id == DefaultRoster.orionID }!
+        let warden = personas.first { $0.id == DefaultRoster.wardenID }!
+        let debaters = [marcus, sable, orion]
+        let sampleAssignment = ExecutionAssignment(
+            assignedPersonaName: "Marcus",
+            taskInstruction: "Update parser",
+            targetScope: "Sources/",
+            wave: 1
+        )
+
+        let allPrompts: [String] = [
+            DebatePrompts.intakeSystemPrompt(moderator: vera, debaters: debaters, workspacePath: "/tmp", toolsEnabled: false),
+            DebatePrompts.blindOpeningSystemPrompt(debater: orion, allDebaters: debaters, workspacePath: "/tmp", toolsEnabled: false),
+            DebatePrompts.chairFloorDirectionPrompt(moderator: vera, debaters: debaters),
+            DebatePrompts.chairConsensusMediationPrompt(moderator: vera, debaters: debaters, roundNumber: 3),
+            DebatePrompts.rebuttalSystemPrompt(debater: sable, allDebaters: debaters, moderatorName: vera.name, roundNumber: 2, isFinalRebuttal: false, workspacePath: "/tmp", toolsEnabled: false),
+            DebatePrompts.peerDirectReplyPrompt(responder: marcus, challengerName: sable.name, question: "How does it recover?", workspacePath: "/tmp", toolsEnabled: false),
+            DebatePrompts.verdictSystemPrompt(moderator: vera, debaters: debaters, toolsEnabled: false),
+            DebatePrompts.coordinatedExecutionSystemPrompt(executor: marcus, moderatorName: vera.name, assignment: sampleAssignment, workspacePath: "/tmp"),
+            DebatePrompts.followUpTurnSystemPrompt(persona: vera, peers: debaters, workspacePath: "/tmp", toolsEnabled: false, allowWrites: false),
+            DebatePrompts.handoffSynthesisSystemPrompt(moderator: vera, customInstruction: ""),
+            DebatePrompts.buildIntakeSystemPrompt(moderator: vera, debaters: debaters, workspacePath: "/tmp"),
+            DebatePrompts.buildHuddleSpecialistPrompt(debater: marcus, allDebaters: debaters, workspacePath: "/tmp"),
+            DebatePrompts.buildBlueprintSystemPrompt(moderator: vera, debaters: debaters, workspacePath: "/tmp"),
+            DebatePrompts.buildVerificationGatePrompt(verifier: sable, moderatorName: vera.name, workspacePath: "/tmp"),
+            DebatePrompts.buildFixPassPrompt(fixer: marcus, moderatorName: vera.name, verifierName: sable.name, issues: ["Fix test"], workspacePath: "/tmp"),
+            DebatePrompts.completenessAuditSystemPrompt(reviewer: warden, moderatorName: vera.name, teamNames: ["Marcus"], iteration: 1, workspacePath: "/tmp"),
+            DebatePrompts.completenessRemediationPlanPrompt(moderator: vera, debaters: debaters, reviewerName: warden.name, missingItems: ["Connect asset"], iteration: 1, workspacePath: "/tmp"),
+            DebatePrompts.completenessRemediationExecutionPrompt(executor: marcus, moderatorName: vera.name, reviewerName: warden.name, assignment: sampleAssignment, workspacePath: "/tmp"),
+            DebatePrompts.chairLiveSteeringPrompt(moderator: vera, debaters: debaters, steeringTexts: ["Keep memory under 2 GB."], isNearEndOfDebate: false),
+            DebatePrompts.buildLiveSteeringPrompt(moderator: vera, debaters: debaters, steeringTexts: ["Also generate JSON output."], remainingAssignments: [sampleAssignment], workspacePath: "/tmp"),
+        ]
+
+        let requiredExamples = [
+            #"Bad: "he's wearing the hat of a gamer" → Good: "he's game testing the game""#,
+            #"Bad: "she's the backbone of the team" → Good: "she does the work the team depends on""#,
+            #"Bad: "we're in the same boat" → Good: "we have the same problem""#,
+        ]
+
+        for (idx, prompt) in allPrompts.enumerated() {
+            XCTAssertTrue(prompt.contains("Write in literal language only. No metaphors, similes"), "Prompt \(idx) missing plain-language rule")
+            for ex in requiredExamples {
+                XCTAssertTrue(prompt.contains(ex), "Prompt \(idx) missing required example: \(ex)")
+            }
+        }
+
+        let bannedPersonaPhrases = [
+            "Uses crisp analogies",
+            "castles in the sky",
+            "devil's advocate",
+            "holds water",
+            "hand-waving",
+            "fits like native code",
+            "punch-list",
+            "watering down",
+        ]
+        for persona in personas {
+            XCTAssertTrue(persona.debateStyle.contains(DefaultRoster.plainLanguageDebateRule), "\(persona.name) missing plainLanguageDebateRule")
+            let combined = "\(persona.tagline)\n\(persona.personality)\n\(persona.debateStyle)"
+            for phrase in bannedPersonaPhrases {
+                XCTAssertFalse(combined.localizedCaseInsensitiveContains(phrase), "\(persona.name) still contains figurative phrase: \(phrase)")
+            }
+        }
+    }
+
+    func testLiveDebateSteeringInterruptsBetweenTurnsAndExtendsFinalRound() async throws {
+        let personas = DefaultRoster.personas
+        let vera = personas.first { $0.id == DefaultRoster.veraID }!
+        let marcus = personas.first { $0.id == DefaultRoster.marcusID }!
+        let sable = personas.first { $0.id == DefaultRoster.sableID }!
+        let debaters = [marcus, sable]
+        let inbox = SteeringInbox()
+        let injectedOnce = LockedBox(false)
+        let callOrder = LockedBox<[String]>([])
+        let sawSteeringInContext = LockedBox<[String: Bool]>([:])
+
+        let runner = FakeModelRunner { req in
+            let speakerName = [vera, marcus, sable].first {
+                req.systemPrompt.contains("You are \($0.name),")
+            }?.name ?? "Unknown"
+
+            if req.userPrompt.contains("USER LIVE STEERING COMMENT") {
+                sawSteeringInContext.withLock { $0[speakerName] = true }
+            }
+
+            if req.systemPrompt.contains("INTAKE TRIAGE") {
+                callOrder.withLock { $0.append("Intake:\(speakerName)") }
+                return ModelCallResponse(rawText: """
+                {
+                  "session_title": "Offline Sync Engine",
+                  "needs_interview": false,
+                  "spoken_intro": "",
+                  "supporting_notes": "",
+                  "questions": []
+                }
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("ROUND 1 — BLIND OPENING STANCE") {
+                callOrder.withLock { $0.append("R1:\(speakerName)") }
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "opening",
+                  "spoken_take": "Use SQLite WAL mode for local persistence.",
+                  "supporting_notes": "",
+                  "key_points": ["SQLite WAL"]
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("DIRECT THE FLOOR") {
+                callOrder.withLock { $0.append("Floor:\(speakerName)") }
+                return ModelCallResponse(rawText: """
+                {
+                  "spoken_take": "Marcus, address conflict resolution first.",
+                  "supporting_notes": ""
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("STEER THE CONVERSATION IMMEDIATELY") {
+                callOrder.withLock { $0.append("Steer:\(speakerName)") }
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "moderating",
+                  "target_persona": "",
+                  "spoken_take": "The user just added a constraint: the sync database must run with zero network permissions on iOS extensions. Panel, evaluate that immediately.",
+                  "direct_question_for_peer": "",
+                  "needs_extra_round": true,
+                  "supporting_notes": "Enforce iOS App Group file locks."
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("LIVE INTER-PERSONA DEBATE") {
+                callOrder.withLock { $0.append("Rebuttal:\(speakerName)") }
+                // Inject live steering WHILE the first speaker in Round 2 is speaking!
+                let shouldInject = injectedOnce.withLock { already -> Bool in
+                    if !already {
+                        already = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldInject {
+                    inbox.enqueue(
+                        UserPromptMessage(
+                            text: "Must work inside an iOS Share Extension with zero network permissions.",
+                            isSteering: true,
+                            steeredToPersonaName: vera.name
+                        )
+                    )
+                }
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "building",
+                  "target_persona": "Marcus",
+                  "spoken_take": "Use App Group SQLite shared locks without background sockets.",
+                  "supporting_notes": "",
+                  "key_points": ["App Group locks"]
+                }
+                """, durationMs: 20)
+            } else if req.systemPrompt.contains("CO-SIGNED VERDICT & COORDINATED EXECUTION PLAN") {
+                callOrder.withLock { $0.append("Verdict:\(speakerName)") }
+                return ModelCallResponse(rawText: """
+                {
+                  "headline": "Use App Group SQLite With Zero Network Permissions",
+                  "spoken_verdict": "We cosign an App Group SQLite queue that requires zero network access inside the Share Extension.",
+                  "recommendation": "Write queued mutations to an App Group SQLite file and sync from the main app.",
+                  "action_steps": ["Configure App Group container", "Flush queue from main app"],
+                  "key_tradeoffs": ["Sync waits until main app opens"],
+                  "cosigned_by": ["Marcus", "Sable"],
+                  "dissents": []
+                }
+                """, durationMs: 25)
+            }
+            return ModelCallResponse(rawText: "{}", durationMs: 10)
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        let session = DebateSession(
+            moderatorID: vera.id,
+            debaterIDs: debaters.map(\.id),
+            maxRebuttalRounds: 1
+        )
+
+        let finished = try await orchestrator.submitUserMessage(
+            text: "Design our local sync queue.",
+            into: session,
+            moderator: vera,
+            debaters: debaters,
+            steeringInbox: inbox
+        ) { _ in }
+
+        XCTAssertEqual(finished.stage, .completed)
+
+        let order = callOrder.withLock { $0 }
+        // Verify Vera handled the steering IMMEDIATELY after the 1st Round 2 turn, BEFORE the 2nd Round 2 turn!
+        let rebuttalIndices = order.enumerated().compactMap { $0.element.hasPrefix("Rebuttal:") ? $0.offset : nil }
+        XCTAssertEqual(rebuttalIndices.count, 4, "Expected Round 2 (2 turns) + extended Round 3 (2 turns) so the whole council addresses the steering before Verdict. Order: \(order)")
+        let steerCallIndex = try XCTUnwrap(order.firstIndex(of: "Steer:Vera"))
+        XCTAssertEqual(steerCallIndex, rebuttalIndices[0] + 1, "Steering must be read by Vera immediately after the current speaker finishes, before the next speaker starts. Order: \(order)")
+        XCTAssertEqual(rebuttalIndices[1], steerCallIndex + 1, "Next scheduled speaker in Round 2 must run right after Vera's live steering turn. Order: \(order)")
+
+        let seen = sawSteeringInContext.withLock { $0 }
+        XCTAssertEqual(seen["Marcus"], true)
+        XCTAssertEqual(seen["Sable"], true)
+        XCTAssertEqual(seen["Vera"], true)
+
+        // Verify the steering prompt and Vera's Live Steering turn were both recorded in the session timeline
+        let steeringPrompts = finished.entries.compactMap { entry -> UserPromptMessage? in
+            if case .userPrompt(let m) = entry, m.isSteering == true { return m }
+            return nil
+        }
+        XCTAssertEqual(steeringPrompts.count, 1)
+        XCTAssertEqual(steeringPrompts.first?.steeredToPersonaName, "Vera")
+
+        let steeringTurns = finished.entries.compactMap { entry -> DebateTurn? in
+            if case .turn(let t) = entry, t.roundLabel == "Live Steering" { return t }
+            return nil
+        }
+        XCTAssertEqual(steeringTurns.count, 1)
+        XCTAssertEqual(steeringTurns.first?.personaID, vera.id)
+
+        // HandoffPromptBuilder includes Live Steering Instructions
+        let verdict = try XCTUnwrap(
+            finished.entries.compactMap { entry -> CosignVerdict? in
+                if case .verdict(let v) = entry { return v }
+                return nil
+            }.first
+        )
+        let handoff = HandoffPromptBuilder.build(session: finished, verdict: verdict)
+        XCTAssertTrue(handoff.contains("### Live Steering Instructions"))
+        XCTAssertTrue(handoff.contains("zero network permissions"))
+    }
+
+    func testLiveBuildModeSteeringUpdatesRemainingExecutionWavesImmediately() async throws {
+        let personas = DefaultRoster.personas
+        let atlas = personas.first { $0.id == DefaultRoster.atlasID }!
+        let marcus = personas.first { $0.id == DefaultRoster.marcusID }!
+        let orion = personas.first { $0.id == DefaultRoster.orionID }!
+        let sable = personas.first { $0.id == DefaultRoster.sableID }!
+        let debaters = [marcus, orion, sable]
+        let inbox = SteeringInbox()
+        let executedScopes = LockedBox<[String]>([])
+        let tempBuildDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-build-steer-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempBuildDir) }
+
+        let runner = FakeModelRunner { req in
+            if req.systemPrompt.contains("BUILD MODE INTAKE") {
+                return ModelCallResponse(rawText: """
+                {
+                  "session_title": "CSV Exporter",
+                  "needs_interview": false,
+                  "spoken_intro": "",
+                  "supporting_notes": "",
+                  "questions": []
+                }
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("ARCHITECTURE & WORKSTREAM HUDDLE") {
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "building",
+                  "spoken_take": "Keep exporter in one module.",
+                  "supporting_notes": "",
+                  "key_points": ["Single module"]
+                }
+                """, durationMs: 10)
+            } else if req.systemPrompt.contains("BUILD BLUEPRINT") {
+                return ModelCallResponse(rawText: """
+                {
+                  "headline": "Build CSV Exporter",
+                  "spoken_verdict": "Marcus writes exporter.py in wave 1.",
+                  "recommendation": "Single wave build.",
+                  "action_steps": ["Write exporter.py"],
+                  "cosigned_by": ["Marcus", "Orion", "Sable"],
+                  "should_auto_execute": true,
+                  "execution_assignments": [
+                    {
+                      "assigned_to": "Marcus",
+                      "wave": 1,
+                      "task_instruction": "Create exporter.py",
+                      "target_scope": "exporter.py"
+                    }
+                  ]
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("ASSIGNED TASK") {
+                if req.systemPrompt.contains("exporter.py") {
+                    executedScopes.withLock { $0.append("exporter.py") }
+                    // User sends live steering WHILE Wave 1 is executing!
+                    inbox.enqueue(
+                        UserPromptMessage(
+                            text: "Also add a JSONL output flag and tests in test_jsonl.py before QA.",
+                            isSteering: true,
+                            steeredToPersonaName: atlas.name
+                        )
+                    )
+                } else if req.systemPrompt.contains("test_jsonl.py") {
+                    executedScopes.withLock { $0.append("test_jsonl.py") }
+                }
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "executing",
+                  "spoken_take": "Completed assigned files.",
+                  "supporting_notes": "",
+                  "key_points": ["Done"]
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("UPDATE BUILD WORKSTREAMS FROM LIVE STEERING") {
+                XCTAssertTrue(req.systemPrompt.contains("You are \(atlas.name),"))
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "moderating",
+                  "spoken_take": "Got your note. Before QA runs, Orion will add JSONL output support and test_jsonl.py in a new wave.",
+                  "supporting_notes": "Added wave 2 for JSONL flag.",
+                  "execution_assignments": [
+                    {
+                      "assigned_to": "Orion",
+                      "wave": 2,
+                      "task_instruction": "Add --jsonl flag and test_jsonl.py",
+                      "target_scope": "test_jsonl.py"
+                    }
+                  ]
+                }
+                """, durationMs: 15)
+            } else if req.systemPrompt.contains("ADVERSARIAL QA & VERIFICATION GATE") {
+                return ModelCallResponse(rawText: """
+                {
+                  "stance": "verifying",
+                  "verification_passed": true,
+                  "spoken_take": "Verified both CSV and JSONL flags pass all tests.",
+                  "issues_found": [],
+                  "files_summary": ["exporter.py", "test_jsonl.py"],
+                  "how_to_run": "pytest",
+                  "supporting_notes": "",
+                  "key_points": ["All tests pass"]
+                }
+                """, durationMs: 15)
+            }
+            return ModelCallResponse(rawText: "{}", durationMs: 10)
+        }
+
+        let orchestrator = DebateOrchestrator(runner: runner)
+        let buildSession = DebateSession(
+            moderatorID: atlas.id,
+            debaterIDs: debaters.map(\.id),
+            mode: .build,
+            hasExplicitBuildFolder: true,
+            completenessReviewEnabled: false,
+            workspacePath: tempBuildDir.path
+        )
+
+        let finished = try await orchestrator.submitUserMessage(
+            text: "Build a CSV exporter CLI.",
+            into: buildSession,
+            moderator: atlas,
+            debaters: debaters,
+            steeringInbox: inbox
+        ) { _ in }
+
+        XCTAssertEqual(finished.stage, .completed)
+        XCTAssertEqual(executedScopes.withLock { $0 }, ["exporter.py", "test_jsonl.py"])
+
+        let turns = finished.entries.compactMap { entry -> DebateTurn? in
+            if case .turn(let t) = entry { return t }
+            return nil
+        }
+        XCTAssertTrue(turns.contains(where: { $0.roundLabel == "Live Steering" && $0.personaID == atlas.id }))
+    }
+
+    func testLegacyPersonasOnDiskAutomaticallyUpgradeToPlainLiteralLanguageOnAppUpdate() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-upgrade-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = SessionStore(rootDirectory: tempDir)
+        var legacyOrion = DefaultRoster.personas.first { $0.id == DefaultRoster.orionID }!
+        legacyOrion.debateStyle = "Uses crisp analogies and first-principles reframes."
+        legacyOrion.modelID = "custom-pinned-model"
+
+        let customPersona = Persona(
+            name: "Quinn",
+            title: "The Reviewer",
+            tagline: "Checks edge cases",
+            role: .debater,
+            provider: .claude,
+            modelID: "claude-opus-5-5",
+            personality: "Focused",
+            debateStyle: "Direct technical reviews.",
+            accentHex: "#38BDF8",
+            avatarSymbol: "magnifyingglass",
+            voicePresetID: "sable",
+            isBuiltIn: false
+        )
+
+        store.savePersonas([legacyOrion, customPersona])
+        let upgraded = store.loadPersonas()
+
+        let upgradedOrion = try XCTUnwrap(upgraded.first { $0.id == DefaultRoster.orionID })
+        XCTAssertFalse(upgradedOrion.debateStyle.contains("Uses crisp analogies"))
+        XCTAssertTrue(upgradedOrion.debateStyle.contains(DefaultRoster.plainLanguageDebateRule))
+        XCTAssertEqual(upgradedOrion.modelID, "custom-pinned-model", "Should preserve user's model selection on built-in persona")
+
+        let upgradedCustom = try XCTUnwrap(upgraded.first { $0.id == customPersona.id })
+        XCTAssertTrue(upgradedCustom.debateStyle.contains(DefaultRoster.plainLanguageDebateRule))
+    }
 }

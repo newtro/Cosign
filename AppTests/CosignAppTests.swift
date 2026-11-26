@@ -81,6 +81,48 @@ final class CosignAppTests: XCTestCase {
         XCTAssertEqual(appModel.selectedSessionID, appModel.sessions[0].id)
     }
 
+    func testSendPromptWhileBusyQueuesLiveSteeringForActiveLeader() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("cosign-steer-apptest-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = SessionStore(rootDirectory: tempDir)
+        let appModel = AppModel(store: store, testing: true)
+
+        var runningSession = try XCTUnwrap(appModel.currentSession)
+        runningSession.stage = .debating
+        runningSession.entries = [
+            .userPrompt(UserPromptMessage(text: "Evaluate our multiplayer server tick rate."))
+        ]
+        appModel.sessions[0] = runningSession
+
+        let leader = appModel.activeModerator(for: runningSession)
+        XCTAssertEqual(leader.name, "Vera")
+
+        // Sending a prompt while the session is busy routes directly to live steering for the active leader (Vera)
+        appModel.sendPrompt("Focus on 30 Hz mobile battery usage before deciding.")
+
+        let queued = appModel.pendingSteeringMessages(for: runningSession.id)
+        XCTAssertEqual(queued.count, 1)
+        XCTAssertEqual(queued.first?.isSteering, true)
+        XCTAssertEqual(queued.first?.steeredToPersonaName, "Vera")
+        XCTAssertEqual(queued.first?.text, "Focus on 30 Hz mobile battery usage before deciding.")
+
+        // Render the live busy UI with queued steering card + composer Steer button to verify zero layout/hosting issues
+        let hosting = NSHostingView(rootView: CosignRootView(model: appModel).environment(\.colorScheme, .dark))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1280, height: 860)
+        hosting.layoutSubtreeIfNeeded()
+
+        // Stopping a run flushes any unconsumed steering note into session.entries so the user's input is never lost
+        appModel.stopCurrentRun()
+        XCTAssertTrue(appModel.pendingSteeringMessages(for: runningSession.id).isEmpty)
+        let committedPrompts = appModel.currentSession?.entries.compactMap { entry -> UserPromptMessage? in
+            if case .userPrompt(let msg) = entry, msg.isSteering == true { return msg }
+            return nil
+        } ?? []
+        XCTAssertEqual(committedPrompts.count, 1)
+        XCTAssertEqual(committedPrompts.first?.steeredToPersonaName, "Vera")
+    }
+
     func testOptionalVisualUISnapshots() throws {
         guard let outDirPath = ProcessInfo.processInfo.environment["COSIGN_SNAPSHOT_DIR"], !outDirPath.isEmpty else {
             return
@@ -120,8 +162,8 @@ final class CosignAppTests: XCTestCase {
                 modelLabel: "Claude Opus 5.5",
                 stance: .challenging,
                 targetPersonaName: "Marcus",
-                spokenTake: "[chuckle] Hold on Marcus—if you run those CLIs against the user's real home directory, every personal skill and memory file will contaminate the personas. Isolate HOME or don't bother.",
-                thoughtProcess: "Shared CLI contexts create subtle anchoring bugs across turns.",
+                spokenTake: "[chuckle] Hold on Marcus—if you run those CLIs against the user's real home directory, every personal skill and memory file will affect the personas. Isolate HOME or don't bother.",
+                thoughtProcess: "Shared CLI contexts cause unintended bias across turns.",
                 keyPoints: ["Sandbox HOME per call", "Sync refreshed OAuth tokens back"],
                 durationMs: 3820
             )),
@@ -130,12 +172,12 @@ final class CosignAppTests: XCTestCase {
                 moderatorName: "Vera",
                 headline: "Ship a Native SwiftUI App Over Isolated Subscription CLIs + MLX Chatterbox",
                 spokenVerdict: "We have a clear verdict: pair a compact two-layer SwiftUI studio interface with isolated subscription CLIs and local Chatterbox Turbo voices.",
-                recommendation: "Run `claude`, `codex`, and `agy` inside ephemeral home directories so personas stay pure while burning flat-rate subscription quota, and synthesize spoken turns locally on Metal with Chatterbox Turbo.",
+                recommendation: "Run `claude`, `codex`, and `agy` inside temporary home directories so personas stay isolated while using flat-rate subscription quota, and synthesize spoken turns locally on Metal with Chatterbox Turbo.",
                 actionSteps: [
                     "Run parallel blind opening stances before cross-examination to prevent groupthink",
                     "Keep turn cards to 2–4 spoken sentences with 1-click expandable thought drawers"
                 ],
-                keyTradeoffs: ["macOS Apple Silicon focus vs. zero cloud API or TTS token burn"],
+                keyTradeoffs: ["macOS Apple Silicon focus vs. zero cloud API or TTS token cost"],
                 cosignedPersonaIDs: [DefaultRoster.marcusID, DefaultRoster.orionID],
                 cosignedNames: ["Marcus", "Orion"],
                 dissents: [
@@ -143,7 +185,7 @@ final class CosignAppTests: XCTestCase {
                         personaID: DefaultRoster.sableID,
                         personaName: "Sable",
                         accentHex: "#F43F5E",
-                        coreObjection: "Watch CLI flag drift across auto-updates—keep fallback parsers so a CLI format bump never breaks a live session."
+                        coreObjection: "Watch for CLI flag changes across auto-updates—keep fallback parsers so a CLI output format change never breaks a live session."
                     )
                 ],
                 moderatorThoughtProcess: "All three debaters converged on isolated CLI sandboxes; preserved Sable's CLI-version resilience warning."

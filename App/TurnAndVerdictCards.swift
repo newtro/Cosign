@@ -8,20 +8,28 @@ import SwiftUI
 struct UserPromptCardView: View {
     @ObservedObject var model: AppModel
     let message: UserPromptMessage
+    var isQueuedLiveSteering: Bool = false
 
     var body: some View {
         let images = message.imageAttachments
+        let isSteering = (message.isSteering == true) || isQueuedLiveSteering
+        let steeredName = (message.steeredToPersonaName ?? "Chair").uppercased()
+        let headerColor: Color = isSteering ? StudioTheme.emerald : StudioTheme.brassBright
         HStack {
             Spacer(minLength: 80)
             VStack(alignment: .trailing, spacing: 8) {
                 HStack(spacing: 6) {
-                    Text("YOU")
+                    Text(
+                        isQueuedLiveSteering
+                            ? "STEERING QUEUED FOR \(steeredName) · READS NEXT"
+                            : (isSteering ? "YOU · STEERED \(steeredName)" : "YOU")
+                    )
                         .font(.system(size: 10, weight: .heavy, design: .rounded))
                         .tracking(0.8)
-                        .foregroundStyle(StudioTheme.brassBright)
-                    Image(systemName: "person.crop.circle.fill")
+                        .foregroundStyle(headerColor)
+                    Image(systemName: isSteering ? "arrow.triangle.turn.up.right.circle.fill" : "person.crop.circle.fill")
                         .font(.system(size: 12))
-                        .foregroundStyle(StudioTheme.brassBright)
+                        .foregroundStyle(headerColor)
                 }
 
                 if !images.isEmpty {
@@ -97,7 +105,10 @@ struct UserPromptCardView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(StudioTheme.brass.opacity(0.28), lineWidth: 1)
+                                .strokeBorder(
+                                    isSteering ? StudioTheme.emerald.opacity(0.45) : StudioTheme.brass.opacity(0.28),
+                                    lineWidth: 1
+                                )
                         )
                 }
             }
@@ -663,7 +674,11 @@ struct DebateTurnCardView: View {
 
     @ViewBuilder
     private func stancePill(accent: Color) -> some View {
+        let isLiveSteeringTurn = turn.roundLabel == "Live Steering"
         let pillColor: Color = {
+            if isLiveSteeringTurn {
+                return StudioTheme.emerald
+            }
             switch turn.stance {
             case .cosigning, .conceding, .executing: return StudioTheme.emerald
             case .dissenting: return StudioTheme.crimson
@@ -674,6 +689,9 @@ struct DebateTurnCardView: View {
         }()
 
         let text: String = {
+            if isLiveSteeringTurn {
+                return "Applying Your Steering"
+            }
             if let target = turn.targetPersonaName, !target.isEmpty,
                turn.stance == .challenging || turn.stance == .replying || turn.stance == .building || turn.stance == .conceding {
                 return "\(turn.stance.label) \(target)"
@@ -682,7 +700,7 @@ struct DebateTurnCardView: View {
         }()
 
         HStack(spacing: 4) {
-            Image(systemName: turn.stance.symbolName)
+            Image(systemName: isLiveSteeringTurn ? "arrow.triangle.turn.up.right.circle.fill" : turn.stance.symbolName)
                 .font(.system(size: 9, weight: .bold))
             Text(text)
                 .font(.system(size: 10.5, weight: .semibold))

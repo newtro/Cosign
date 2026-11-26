@@ -14,27 +14,27 @@ struct EmptyCouncilWelcomeView: View {
     private let debateStarters: [(icon: String, title: String, subtitle: String, prompt: String)] = [
         (
             "lightbulb.max.fill",
-            "Shape a Half-Baked App Idea",
+            "Clarify an Early App Idea",
             "Panel interviews you first, then debates scope & MVP",
-            "I have a half-baked idea for a tool I want to build, and I want you guys to interview me on the missing pieces and help figure out the sharpest v1."
+            "I have an early idea for a tool I want to build, and I want you guys to interview me on the missing details and help define the first version."
         ),
         (
             "scale.3d",
-            "Stress-Test a Technical Bet",
+            "Evaluate a Technical Choice",
             "Pragmatist vs. Skeptic vs. Lateral Thinker",
-            "We need to choose between building a custom local-first sync engine or leaning on CloudKit for a macOS + iOS app. Debate the real trade-offs."
+            "We need to choose between building a custom local-first sync engine or using CloudKit for a macOS + iOS app. Debate the real trade-offs."
         ),
         (
             "chart.line.uptrend.xyaxis",
-            "Product & Pricing Wedge",
-            "Find blind spots before committing",
-            "Help me figure out the smartest positioning and pricing model for a niche creator utility without racing to the bottom."
+            "Product & Pricing Strategy",
+            "Identify overlooked risks before committing",
+            "Help me figure out the clearest positioning and pricing model for a niche creator utility without competing on low price alone."
         ),
         (
             "bolt.shield.fill",
-            "Red-Team My Plan",
-            "Poke holes in assumptions before I start",
-            "I'm about to spend two weeks building a new project—interview me about what it is, try to talk me out of the weak parts, and co-sign what survives."
+            "Critique My Plan",
+            "Test assumptions before I start",
+            "I'm about to spend two weeks building a new project—interview me about what it is, point out the weak parts, and co-sign the parts worth keeping."
         ),
     ]
 
@@ -55,13 +55,13 @@ struct EmptyCouncilWelcomeView: View {
             "sparkles.rectangle.stack.fill",
             "Implement a Feature in Existing Repo",
             "Inspect repo, split workstreams, verify tests",
-            "Inspect this repository, propose the cleanest implementation plan, divide the workstreams across the council, and verify all existing and new tests pass."
+            "Inspect this repository, propose the clearest implementation plan, divide the workstreams across the council, and verify all existing and new tests pass."
         ),
         (
             "checkmark.shield.fill",
-            "Audit, Fix & Harden Repo",
+            "Audit, Fix & Test Repo",
             "Find real bugs, fix them, and prove with tests",
-            "Audit this codebase for bugs or missing test coverage, implement surgical fixes sequentially, and verify the full build and test suite pass."
+            "Audit this codebase for bugs or missing test coverage, implement targeted fixes sequentially, and verify the full build and test suite pass."
         ),
     ]
 
@@ -120,7 +120,7 @@ struct EmptyCouncilWelcomeView: View {
 
                 Text(isBuild
                      ? "Pick or create a local folder. The council aligns on architecture, executes parallel workstreams\nwith sub-agents, runs QA tests, and loops with your Completeness Reviewer to 100%."
-                     : "Pitch a rough spark or tough decision. The panel will interview you on what's missing,\ndebate it aloud in compact turns, and deliver a Co-Signed Verdict.")
+                     : "Share an early idea or difficult decision. The panel will interview you on what's missing,\ndebate it aloud in compact turns, and deliver a Co-Signed Verdict.")
                     .font(.system(size: 13.5))
                     .lineSpacing(3.5)
                     .multilineTextAlignment(.center)
@@ -229,6 +229,8 @@ struct StudioComposerDock: View {
 
     var body: some View {
         let pendingAttachments = model.currentPendingAttachments
+        let moderator = model.activeModerator(for: session)
+        let participants = [moderator] + model.activeDebaters(for: session)
         let hasPriorVerdict = session.entries.contains {
             if case .verdict = $0 { return true }
             return false
@@ -240,9 +242,50 @@ struct StudioComposerDock: View {
 
             Divider().overlay(Color.white.opacity(0.07))
 
-            // Quick @Mention Follow-up Strip once a verdict exists
-            if hasPriorVerdict && !session.stage.isBusy {
-                let participants = [model.activeModerator(for: session)] + model.activeDebaters(for: session)
+            // Live Steering Strip while a debate or build run is active
+            if session.stage.isBusy {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.turn.up.right.circle.fill")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("Live Steering · Sent to \(moderator.name) (\(moderator.title)) as soon as the current turn finishes")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundStyle(StudioTheme.emerald)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(StudioTheme.emerald.opacity(0.13)))
+                        .overlay(Capsule().strokeBorder(StudioTheme.emerald.opacity(0.32), lineWidth: 0.8))
+
+                        ForEach(model.activeDebaters(for: session)) { p in
+                            Button {
+                                if !draftText.contains("@\(p.name)") {
+                                    draftText = draftText.isEmpty ? "@\(p.name) " : "\(draftText) @\(p.name) "
+                                }
+                                isInputFocused = true
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(Color(hex: p.accentHex))
+                                        .frame(width: 6, height: 6)
+                                    Text("@\(p.name)")
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                                .foregroundStyle(StudioTheme.inkSecondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3.5)
+                                .background(Capsule().fill(Color.white.opacity(0.05)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 9)
+                    .padding(.bottom, 2)
+                }
+            } else if hasPriorVerdict {
+                // Quick @Mention Follow-up Strip once a verdict exists
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         Text("Ask directly:")
@@ -343,14 +386,18 @@ struct StudioComposerDock: View {
 
             // Main Prompt Input Row (Static NSTextField placeholder + SwiftUI overlay avoids AppKit IMKInputSession re-entrant RunLoop lockup!)
             let placeholderText = !pendingAttachments.isEmpty
-                ? "Add instructions for the attached image\(pendingAttachments.count == 1 ? "" : "s"), or press Return to send…"
-                : (session.entries.isEmpty
-                    ? (session.activeMode == .build
-                        ? "Describe what to build, or paste/drop a screenshot (⌘V)…"
-                        : "Pitch an idea or paste/drop an image for the council (⌘V)…")
-                    : (session.activeMode == .build
-                        ? "Ask for the next feature, fix, paste a screenshot (⌘V), or @mention…"
-                        : "Follow up, push back, paste an image (⌘V), or @mention…"))
+                ? (session.stage.isBusy
+                    ? "Add steering instructions for \(moderator.name) with the attached image\(pendingAttachments.count == 1 ? "" : "s"), or press Return…"
+                    : "Add instructions for the attached image\(pendingAttachments.count == 1 ? "" : "s"), or press Return to send…")
+                : (session.stage.isBusy
+                    ? "Steer \(moderator.name) — add instructions or constraints while the council is working (⏎)…"
+                    : (session.entries.isEmpty
+                        ? (session.activeMode == .build
+                            ? "Describe what to build, or paste/drop a screenshot (⌘V)…"
+                            : "Pitch an idea or paste/drop an image for the council (⌘V)…")
+                        : (session.activeMode == .build
+                            ? "Ask for the next feature, fix, paste a screenshot (⌘V), or @mention…"
+                            : "Follow up, push back, paste an image (⌘V), or @mention…")))
 
             HStack(alignment: .bottom, spacing: 10) {
                 Button {
@@ -370,7 +417,6 @@ struct StudioComposerDock: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .disabled(session.stage.isBusy)
                 .help("Attach image(s) or screenshots (or paste directly with ⌘V / drag & drop)")
 
                 ZStack(alignment: .topLeading) {
@@ -394,7 +440,7 @@ struct StudioComposerDock: View {
                                 return .ignored
                             }
                             let hasContent = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.currentPendingAttachments.isEmpty
-                            if !session.stage.isBusy && hasContent {
+                            if hasContent {
                                 let toSend = draftText
                                 draftText = ""
                                 model.sendPrompt(toSend)
@@ -405,24 +451,51 @@ struct StudioComposerDock: View {
                         .padding(.vertical, 6)
                 }
 
+                let canSend = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
                 if session.stage.isBusy {
-                    Button {
-                        model.stopCurrentRun()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 10, weight: .bold))
-                            Text("Stop")
-                                .font(.system(size: 12.5, weight: .semibold))
+                    HStack(spacing: 8) {
+                        Button {
+                            let toSend = draftText
+                            draftText = ""
+                            model.sendPrompt(toSend)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.triangle.turn.up.right.circle.fill")
+                                    .font(.system(size: 11.5, weight: .bold))
+                                Text("Steer \(moderator.name)")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                            }
+                            .foregroundStyle(Color(hex: "#071410"))
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(StudioTheme.emerald)
+                                    .shadow(color: StudioTheme.emerald.opacity(0.30), radius: 8, y: 3)
+                            )
                         }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(StudioTheme.crimson))
+                        .buttonStyle(.plain)
+                        .disabled(!canSend)
+                        .opacity(canSend ? 1.0 : 0.38)
+                        .help("Send this steering note to \(moderator.name) to read as soon as the current turn finishes")
+
+                        Button {
+                            model.stopCurrentRun()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("Stop")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(StudioTheme.crimson))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 } else {
-                    let canSend = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
                     Button {
                         let toSend = draftText
                         draftText = ""
@@ -685,6 +758,10 @@ struct StudioComposerDock: View {
                             .foregroundStyle(StudioTheme.inkMuted)
                     }
                     .buttonStyle(.plain)
+                } else if session.stage.isBusy {
+                    Text("⌘V Image  ·  ⏎ Steer \(moderator.name)  ·  ⇧⏎ New line")
+                        .font(.system(size: 11))
+                        .foregroundStyle(StudioTheme.emerald.opacity(0.85))
                 } else {
                     Text(session.activeMode == .build ? "⌘V Image  ·  ⏎ Build  ·  ⇧⏎ New line" : "⌘V Image  ·  ⏎ Convene  ·  ⇧⏎ New line")
                         .font(.system(size: 11))
@@ -751,7 +828,7 @@ struct StudioComposerDock: View {
                   NSApp.keyWindow?.attachedSheet == nil else {
                 return event
             }
-            if let current = model.currentSession, !current.stage.isBusy,
+            if model.currentSession != nil,
                model.attachImagesFromPasteboard(.general) {
                 return nil
             }

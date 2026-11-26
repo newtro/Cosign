@@ -33,6 +33,7 @@ final class AppModel: ObservableObject {
     @Published var activeHandoffVerdict: CosignVerdict?
     @Published var activeBuildLaunchVerdict: CosignVerdict?
     @Published var pendingAttachmentsBySession: [UUID: [ChatImageAttachment]] = [:]
+    @Published var pendingSteeringBySession: [UUID: [UserPromptMessage]] = [:]
     @Published var activePreviewAttachment: ChatImageAttachment?
 
     let store: SessionStore
@@ -40,6 +41,8 @@ final class AppModel: ObservableObject {
     private let discoveryService: ModelDiscoveryService
     private let orchestrator: DebateOrchestrator
     private var activeRunTask: Task<Void, Never>?
+    private var steeringInboxesBySession: [UUID: SteeringInbox] = [:]
+    private var activeRunSessionID: UUID?
     private var hasAlignedInitialCatalog = false
     private var voiceCancellable: AnyCancellable?
 
@@ -521,12 +524,69 @@ final class AppModel: ObservableObject {
         upsertPersona(target)
     }
 
-    // MARK: - Running Debates & Interviews
+    // MARK: - Running Debates, Interviews & Live Steering
+
+    func pendingSteeringMessages(for sessionID: UUID) -> [UserPromptMessage] {
+        pendingSteeringBySession[sessionID] ?? []
+    }
+
+    private func acquireSteeringInbox(for sessionID: UUID) -> SteeringInbox {
+        if let existing = steeringInboxesBySession[sessionID] {
+            return existing
+        }
+        let created = SteeringInbox()
+        steeringInboxesBySession[sessionID] = created
+        return created
+    }
+
+    private func releaseSteeringInboxIfCurrent(_ inbox: SteeringInbox, for sessionID: UUID) {
+        if steeringInboxesBySession[sessionID] === inbox {
+            steeringInboxesBySession.removeValue(forKey: sessionID)
+        }
+        if activeRunSessionID == sessionID {
+            activeRunSessionID = nil
+        }
+    }
+
+    @discardableResult
+    func sendLiveSteering(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stagedAttachments = currentPendingAttachments
+        guard (!trimmed.isEmpty || !stagedAttachments.isEmpty),
+              let session = currentSession,
+              session.stage.isBusy else {
+            return false
+        }
+
+        let inbox = acquireSteeringInbox(for: session.id)
+        pendingAttachmentsBySession[session.id] = nil
+        let leader = activeModerator(for: session)
+        let effectiveText = trimmed.isEmpty
+            ? "Inspect the attached image(s) and apply them to the current work immediately."
+            : trimmed
+        let steeringMessage = UserPromptMessage(
+            text: effectiveText,
+            attachments: stagedAttachments,
+            isSteering: true,
+            steeredToPersonaName: leader.name
+        )
+        inbox.enqueue(steeringMessage)
+        var queued = pendingSteeringBySession[session.id] ?? []
+        queued.append(steeringMessage)
+        pendingSteeringBySession[session.id] = queued
+        return true
+    }
 
     func sendPrompt(_ text: String, skipInterview: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let stagedAttachments = currentPendingAttachments
-        guard (!trimmed.isEmpty || !stagedAttachments.isEmpty), var session = currentSession, !session.stage.isBusy else { return }
+        guard (!trimmed.isEmpty || !stagedAttachments.isEmpty), var session = currentSession else { return }
+
+        // If the session is currently running, route this immediately as a live steering comment to the leading Moderator / Chair!
+        if session.stage.isBusy {
+            _ = sendLiveSteering(text)
+            return
+        }
 
         // In Build Mode, if no dedicated project folder was picked yet (still pointing at parent repos root),
         // prompt the user right now so they can pick a project directory or click 'New Folder' to create one!
@@ -549,10 +609,15 @@ final class AppModel: ObservableObject {
         let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
+        let inbox = acquireSteeringInbox(for: session.id)
 
         activeRunTask?.cancel()
+        activeRunSessionID = session.id
         activeRunTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.releaseSteeringInboxIfCurrent(inbox, for: session.id)
+            }
             do {
                 let finalSession = try await self.orchestrator.submitUserMessage(
                     text: trimmed,
@@ -563,7 +628,8 @@ final class AppModel: ObservableObject {
                     allPersonas: roster,
                     modelLabels: labels,
                     openRouterKey: orKey,
-                    skipInterview: skipInterview
+                    skipInterview: skipInterview,
+                    steeringInbox: inbox
                 ) { [weak self] event in
                     await self?.handleOrchestratorEvent(event)
                 }
@@ -593,10 +659,15 @@ final class AppModel: ObservableObject {
         let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
+        let inbox = acquireSteeringInbox(for: session.id)
 
         activeRunTask?.cancel()
+        activeRunSessionID = session.id
         activeRunTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.releaseSteeringInboxIfCurrent(inbox, for: session.id)
+            }
             do {
                 let finalSession = try await self.orchestrator.submitInterviewAnswers(
                     exchangeID: exchangeID,
@@ -607,7 +678,8 @@ final class AppModel: ObservableObject {
                     debaters: debaters,
                     allPersonas: roster,
                     modelLabels: labels,
-                    openRouterKey: orKey
+                    openRouterKey: orKey,
+                    steeringInbox: inbox
                 ) { [weak self] event in
                     await self?.handleOrchestratorEvent(event)
                 }
@@ -637,10 +709,15 @@ final class AppModel: ObservableObject {
         let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
+        let inbox = acquireSteeringInbox(for: session.id)
 
         activeRunTask?.cancel()
+        activeRunSessionID = session.id
         activeRunTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.releaseSteeringInboxIfCurrent(inbox, for: session.id)
+            }
             do {
                 let finalSession = try await self.orchestrator.resumeInterruptedDebate(
                     into: session,
@@ -648,7 +725,8 @@ final class AppModel: ObservableObject {
                     debaters: debaters,
                     allPersonas: roster,
                     modelLabels: labels,
-                    openRouterKey: orKey
+                    openRouterKey: orKey,
+                    steeringInbox: inbox
                 ) { [weak self] event in
                     await self?.handleOrchestratorEvent(event)
                 }
@@ -690,10 +768,15 @@ final class AppModel: ObservableObject {
         let roster = personas
         let labels = allModelLabelsByID
         let orKey = KeychainHelper.read(account: "openrouter")
+        let inbox = acquireSteeringInbox(for: session.id)
 
         activeRunTask?.cancel()
+        activeRunSessionID = session.id
         activeRunTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.releaseSteeringInboxIfCurrent(inbox, for: session.id)
+            }
             do {
                 let finalSession = try await self.orchestrator.executeVerdictPlan(
                     verdictID: verdict.id,
@@ -703,7 +786,8 @@ final class AppModel: ObservableObject {
                     debaters: debaters,
                     allPersonas: roster,
                     modelLabels: labels,
-                    openRouterKey: orKey
+                    openRouterKey: orKey,
+                    steeringInbox: inbox
                 ) { [weak self] event in
                     await self?.handleOrchestratorEvent(event)
                 }
@@ -756,12 +840,17 @@ final class AppModel: ObservableObject {
     }
 
     func stopCurrentRun() {
+        let stoppedID = activeRunSessionID ?? selectedSessionID
         activeRunTask?.cancel()
         activeRunTask = nil
+        if let stoppedID {
+            steeringInboxesBySession.removeValue(forKey: stoppedID)
+        }
+        activeRunSessionID = nil
         activeThinkerIDs = []
         liveStatusText = ""
         voiceEngine.stopAll()
-        if let id = selectedSessionID {
+        if let id = stoppedID {
             markSessionStopped(id)
         }
     }
@@ -781,6 +870,11 @@ final class AppModel: ObservableObject {
     }
 
     private func updateSessionInPlace(_ updated: DebateSession) {
+        if var pending = pendingSteeringBySession[updated.id], !pending.isEmpty {
+            let committedIDs = Set(updated.entries.map(\.id))
+            pending.removeAll { committedIDs.contains($0.id) }
+            pendingSteeringBySession[updated.id] = pending.isEmpty ? nil : pending
+        }
         if let idx = sessions.firstIndex(where: { $0.id == updated.id }) {
             sessions[idx] = updated
         } else {
@@ -789,13 +883,24 @@ final class AppModel: ObservableObject {
         store.saveSession(updated)
     }
 
+    private func flushUncommittedSteering(for sessionID: UUID, into session: inout DebateSession) {
+        guard let pending = pendingSteeringBySession.removeValue(forKey: sessionID), !pending.isEmpty else { return }
+        let existingIDs = Set(session.entries.map(\.id))
+        for msg in pending where !existingIDs.contains(msg.id) {
+            session.entries.append(.userPrompt(msg))
+        }
+    }
+
     private func markSessionStopped(_ sessionID: UUID) {
         activeThinkerIDs = []
         liveStatusText = ""
         guard let idx = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+        flushUncommittedSteering(for: sessionID, into: &sessions[idx])
         if sessions[idx].stage.isBusy {
             sessions[idx].stage = .cancelled
             sessions[idx].updatedAt = Date()
+            store.saveSession(sessions[idx])
+        } else {
             store.saveSession(sessions[idx])
         }
     }
@@ -805,6 +910,7 @@ final class AppModel: ObservableObject {
         liveStatusText = ""
         lastErrorBanner = message
         guard let idx = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+        flushUncommittedSteering(for: sessionID, into: &sessions[idx])
         sessions[idx].stage = .error
         sessions[idx].entries.append(.systemNote(UUID(), message))
         sessions[idx].updatedAt = Date()
@@ -878,7 +984,8 @@ final class AppModel: ObservableObject {
     }
 
     func previewPersonaVoice(_ persona: Persona) {
-        let sample = "(laugh) Hi, I'm \(persona.name), \(persona.title). Bring me your sharpest idea or project folder and let's get to work."
+        // Greeting script: literal language only (no metaphors, similes, or idioms)
+        let sample = "(laugh) Hi, I'm \(persona.name), \(persona.title). Share your idea or project folder and let's get to work."
         voiceEngine.isMuted = false
         voiceEngine.speakImmediately(SpeechQueueItem(
             id: UUID(),

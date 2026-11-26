@@ -843,6 +843,25 @@ public enum HandoffPromptBuilder {
             out.append("")
         }
 
+        let verdictIndexForSteering = session.entries.firstIndex(where: { $0.id == verdict.id }) ?? session.entries.endIndex
+        let preVerdictSteering = session.entries[..<verdictIndexForSteering].compactMap { entry -> UserPromptMessage? in
+            if case .userPrompt(let m) = entry, m.isSteering == true { return m }
+            return nil
+        }
+        if !preVerdictSteering.isEmpty {
+            out.append("### Live Steering Instructions")
+            for msg in preVerdictSteering {
+                let text = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let imgNote = msg.imageAttachments.isEmpty
+                    ? ""
+                    : " [Images: " + msg.imageAttachments.map { "`\($0.filePath)`" }.joined(separator: ", ") + "]"
+                if !text.isEmpty || !imgNote.isEmpty {
+                    out.append("- \(text)\(imgNote)")
+                }
+            }
+            out.append("")
+        }
+
         // Core Co-Signed Direction
         out.append("## Agreed Architecture & Strategy")
         let cleanBottomLine = verdict.spokenVerdict
@@ -896,7 +915,8 @@ public enum HandoffPromptBuilder {
                     let imgNote = msg.imageAttachments.isEmpty
                         ? ""
                         : " [Images: " + msg.imageAttachments.map { "`\($0.filePath)`" }.joined(separator: ", ") + "]"
-                    followUps.append("- **User Follow-Up:** \(msg.text)\(imgNote)")
+                    let label = msg.isSteering == true ? "Live Steering" : "User Follow-Up"
+                    followUps.append("- **\(label):** \(msg.text)\(imgNote)")
                 case .turn(let t):
                     let clean = t.spokenTake
                         .replacingOccurrences(of: #"[\[\(](chuckle|laugh|sigh|clears? throat|cough|gasp|groan)[\]\)]"#, with: "", options: [.regularExpression, .caseInsensitive])
@@ -971,6 +991,10 @@ public struct UserPromptMessage: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var text: String
     public var attachments: [ChatImageAttachment]?
+    /// True when the user sent this comment while a council debate or build was actively running to steer the Chair/Lead.
+    public var isSteering: Bool?
+    /// Display name of the leading persona (Moderator / Chair) who received this steering comment.
+    public var steeredToPersonaName: String?
     public var createdAt: Date
 
     public var imageAttachments: [ChatImageAttachment] {
@@ -981,12 +1005,45 @@ public struct UserPromptMessage: Identifiable, Codable, Hashable, Sendable {
         id: UUID = UUID(),
         text: String,
         attachments: [ChatImageAttachment]? = nil,
+        isSteering: Bool? = nil,
+        steeredToPersonaName: String? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
         self.text = text
         self.attachments = (attachments?.isEmpty == true) ? nil : attachments
+        self.isSteering = isSteering
+        self.steeredToPersonaName = steeredToPersonaName
         self.createdAt = createdAt
+    }
+}
+
+/// Thread-safe inbox allowing the UI to pass live steering comments into an active `DebateOrchestrator` run
+/// so the Moderator / Chair leading the debate or build reads and applies them at the earliest turn boundary.
+public final class SteeringInbox: Sendable {
+    private let box = LockedBox<[UserPromptMessage]>([])
+
+    public init() {}
+
+    public func enqueue(_ message: UserPromptMessage) {
+        box.withLock { $0.append(message) }
+    }
+
+    public var hasPending: Bool {
+        box.withLock { !$0.isEmpty }
+    }
+
+    public func peekAll() -> [UserPromptMessage] {
+        box.withLock { $0 }
+    }
+
+    public func drainAll() -> [UserPromptMessage] {
+        box.withLock { items in
+            guard !items.isEmpty else { return [] }
+            let drained = items
+            items.removeAll()
+            return drained
+        }
     }
 }
 

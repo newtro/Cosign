@@ -113,7 +113,7 @@ struct CosignRootView: View {
                             CouncilStageHeader(model: model, session: session)
 
                             // Timeline Stream
-                            if session.entries.isEmpty {
+                            if session.entries.isEmpty && !session.stage.isBusy {
                                 ScrollView {
                                     EmptyCouncilWelcomeView(model: model, session: session) { starter in
                                         draftPrompt = starter
@@ -129,6 +129,11 @@ struct CosignRootView: View {
                                                 ForEach(session.entries) { entry in
                                                     timelineEntryView(entry)
                                                         .id(entry.id)
+                                                }
+
+                                                ForEach(model.pendingSteeringMessages(for: session.id)) { pendingMsg in
+                                                    UserPromptCardView(model: model, message: pendingMsg, isQueuedLiveSteering: true)
+                                                        .id(pendingMsg.id)
                                                 }
 
                                                 if session.stage.isBusy {
@@ -163,6 +168,12 @@ struct CosignRootView: View {
                                                         proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
                                                     }
                                                 }
+                                            }
+                                        }
+                                        .onChange(of: model.pendingSteeringMessages(for: session.id).count) { _, newCount in
+                                            guard newCount > 0 && isScrolledNearBottom else { return }
+                                            withAnimation(.easeOut(duration: 0.24)) {
+                                                proxy.scrollTo("timeline-bottom-sentinel", anchor: .bottom)
                                             }
                                         }
                                         .onChange(of: session.stage) { _, newStage in

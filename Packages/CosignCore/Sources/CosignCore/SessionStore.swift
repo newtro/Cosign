@@ -141,12 +141,27 @@ public final class SessionStore: @unchecked Sendable {
             loaded.append(builtIn)
             updatedAny = true
         }
-        // Backfill default taskSpecialties on older built-in personas that were saved before specialties existed
+        // Backfill default taskSpecialties on older built-in personas and upgrade saved personas to plain literal language rules
         let defaultsByID = Dictionary(uniqueKeysWithValues: DefaultRoster.personas.map { ($0.id, $0) })
-        for idx in loaded.indices where loaded[idx].isBuiltIn && loaded[idx].taskSpecialties == nil && loaded[idx].routingSignal == nil {
-            if let def = defaultsByID[loaded[idx].id], (def.taskSpecialties != nil || def.routingSignal != nil) {
-                loaded[idx].taskSpecialties = def.taskSpecialties
-                loaded[idx].routingSignal = def.routingSignal
+        for idx in loaded.indices {
+            if loaded[idx].isBuiltIn, let def = defaultsByID[loaded[idx].id] {
+                if loaded[idx].taskSpecialties == nil && loaded[idx].routingSignal == nil,
+                   (def.taskSpecialties != nil || def.routingSignal != nil) {
+                    loaded[idx].taskSpecialties = def.taskSpecialties
+                    loaded[idx].routingSignal = def.routingSignal
+                    updatedAny = true
+                }
+                if !loaded[idx].debateStyle.contains(DefaultRoster.plainLanguageDebateRule) {
+                    loaded[idx].tagline = def.tagline
+                    loaded[idx].personality = def.personality
+                    loaded[idx].debateStyle = def.debateStyle
+                    updatedAny = true
+                }
+            } else if !loaded[idx].debateStyle.contains(DefaultRoster.plainLanguageDebateRule) {
+                let trimmed = loaded[idx].debateStyle.trimmingCharacters(in: .whitespacesAndNewlines)
+                loaded[idx].debateStyle = trimmed.isEmpty
+                    ? DefaultRoster.plainLanguageDebateRule
+                    : "\(trimmed) \(DefaultRoster.plainLanguageDebateRule)"
                 updatedAny = true
             }
         }

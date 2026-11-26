@@ -62,6 +62,7 @@ public final class DebateOrchestrator: Sendable {
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
         skipInterview: Bool = false,
+        steeringInbox: SteeringInbox? = nil,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
@@ -91,6 +92,7 @@ public final class DebateOrchestrator: Sendable {
                 debaters: debaters,
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
+                steeringInbox: steeringInbox,
                 onEvent: onEvent
             )
         }
@@ -106,7 +108,6 @@ public final class DebateOrchestrator: Sendable {
                     : "\(moderator.name) is reviewing your pitch with the panel…"
             ))
 
-            let intakePrompt = buildTranscriptContext(for: session)
             let intakeSysPrompt = session.activeMode == .build
                 ? DebatePrompts.buildIntakeSystemPrompt(
                     moderator: moderator,
@@ -119,17 +120,37 @@ public final class DebateOrchestrator: Sendable {
                     workspacePath: session.workspacePath,
                     toolsEnabled: session.hasFullCLITools
                 )
-            let resp = try await callModel(ModelCallRequest(
+            var resp = try await callModel(ModelCallRequest(
                 provider: moderator.provider,
                 modelID: moderator.modelID,
                 effort: moderator.effort,
                 systemPrompt: intakeSysPrompt,
-                userPrompt: intakePrompt,
+                userPrompt: buildTranscriptContext(for: session),
                 allowWebSearch: session.allowWebSearch,
                 toolPhase: researchPhase(for: session),
                 workspacePath: session.workspacePath,
                 openRouterAPIKey: openRouterKey
             ), in: session)
+
+            // If user submitted live steering while intake was scanning, drain immediately so the Chair incorporates it right away
+            let intakeSteered = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
+            if !intakeSteered.isEmpty {
+                await onEvent(.activeThinkersChanged(
+                    [moderator.id],
+                    statusLabel: "\(moderator.name) is incorporating your live steering into intake…"
+                ))
+                resp = try await callModel(ModelCallRequest(
+                    provider: moderator.provider,
+                    modelID: moderator.modelID,
+                    effort: moderator.effort,
+                    systemPrompt: intakeSysPrompt,
+                    userPrompt: buildTranscriptContext(for: session),
+                    allowWebSearch: session.allowWebSearch,
+                    toolPhase: researchPhase(for: session),
+                    workspacePath: session.workspacePath,
+                    openRouterAPIKey: openRouterKey
+                ), in: session)
+            }
 
             if let json = JSONExtractor.parseObject(resp.rawText) {
                 if let newTitle = (json["session_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -159,8 +180,9 @@ public final class DebateOrchestrator: Sendable {
                     }
 
                     if !questions.isEmpty {
+                        // Fallback spoken intro template: literal language only (no metaphors, similes, or idioms)
                         let spokenIntro = (json["spoken_intro"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                            ?? "Before the panel dives in, we have \(questions.count == 1 ? "one quick question" : "\(questions.count) quick questions") to sharpen this."
+                            ?? "Before the panel starts, we have \(questions.count == 1 ? "one quick question" : "\(questions.count) quick questions") to clarify the missing details."
                         let reasoning = (json["supporting_notes"] as? String) ?? (json["thought_process"] as? String) ?? ""
                         let exchange = InterviewExchange(
                             moderatorID: moderator.id,
@@ -198,6 +220,7 @@ public final class DebateOrchestrator: Sendable {
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
                 isIncrementalFollowUp: hadPriorVerdict,
+                steeringInbox: steeringInbox,
                 onEvent: onEvent
             )
         }
@@ -210,6 +233,7 @@ public final class DebateOrchestrator: Sendable {
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             isFollowUpRound: hadPriorVerdict,
+            steeringInbox: steeringInbox,
             onEvent: onEvent
         )
     }
@@ -224,6 +248,7 @@ public final class DebateOrchestrator: Sendable {
         allPersonas: [Persona] = [],
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
+        steeringInbox: SteeringInbox? = nil,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
@@ -248,6 +273,7 @@ public final class DebateOrchestrator: Sendable {
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
                 isIncrementalFollowUp: false,
+                steeringInbox: steeringInbox,
                 onEvent: onEvent
             )
         }
@@ -260,6 +286,7 @@ public final class DebateOrchestrator: Sendable {
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             isFollowUpRound: false,
+            steeringInbox: steeringInbox,
             onEvent: onEvent
         )
     }
@@ -273,6 +300,7 @@ public final class DebateOrchestrator: Sendable {
         allPersonas: [Persona] = [],
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
+        steeringInbox: SteeringInbox? = nil,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
@@ -303,6 +331,7 @@ public final class DebateOrchestrator: Sendable {
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
                 isIncrementalFollowUp: hadPriorVerdict,
+                steeringInbox: steeringInbox,
                 onEvent: onEvent
             )
         }
@@ -314,6 +343,7 @@ public final class DebateOrchestrator: Sendable {
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
             isFollowUpRound: hadPriorVerdict,
+            steeringInbox: steeringInbox,
             onEvent: onEvent
         )
     }
@@ -329,6 +359,7 @@ public final class DebateOrchestrator: Sendable {
         allPersonas: [Persona] = [],
         modelLabels: [String: String] = [:],
         openRouterKey: String? = nil,
+        steeringInbox: SteeringInbox? = nil,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
@@ -351,6 +382,7 @@ public final class DebateOrchestrator: Sendable {
         // If the Verdict came from Debate Mode without granular file workstreams (or user supplied extra build notes),
         // let the Chair inspect the target folder and decompose the plan into concrete workstreams first!
         if assignments.isEmpty || !trimmedExtra.isEmpty {
+            _ = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
             session.stage = .synthesizingVerdict
             await onEvent(.activeThinkersChanged(
                 [moderator.id],
@@ -426,6 +458,7 @@ public final class DebateOrchestrator: Sendable {
             folderName: folderName,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
+            steeringInbox: steeringInbox,
             filesSummary: &initialFilesSummary,
             howToRun: &initialHowToRun,
             onEvent: onEvent
@@ -493,9 +526,47 @@ public final class DebateOrchestrator: Sendable {
             contextLabel: "QA Gate · \(verifier.name)"
         )))
 
+        // If user sent live steering during QA Gate, let Chair dispatch any steered workstreams immediately
+        if let steeringInbox, steeringInbox.hasPending {
+            let (steeredSession, didSteer, postQAWaves) = try await applyBuildSteeringIfNeeded(
+                steeringInbox: steeringInbox,
+                into: session,
+                moderator: moderator,
+                debaters: debaters,
+                remainingAssignments: [],
+                roundNumber: 99,
+                targetFolder: targetFolder,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                onEvent: onEvent
+            )
+            session = steeredSession
+            if didSteer && !postQAWaves.isEmpty {
+                session = try await runExecutionWaves(
+                    waves: postQAWaves,
+                    into: session,
+                    moderator: moderator,
+                    allCouncil: allCouncil,
+                    debaters: debaters,
+                    excludingBuilder: nil,
+                    reviewerNameForRemediation: nil,
+                    remediationPassIndex: nil,
+                    targetFolder: targetFolder,
+                    folderName: folderName,
+                    modelLabels: modelLabels,
+                    openRouterKey: openRouterKey,
+                    steeringInbox: steeringInbox,
+                    filesSummary: &filesSummary,
+                    howToRun: &howToRun,
+                    onEvent: onEvent
+                )
+            }
+        }
+
         // --- AUTOMATED FIX PASS IF QA CAUGHT ISSUES ---
         if !verificationPassed && !issuesFound.isEmpty {
             try Task.checkCancellation()
+            _ = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
             let fixer = selectPrimaryBuilder(
                 from: debaters,
                 excluding: verifier,
@@ -560,6 +631,42 @@ public final class DebateOrchestrator: Sendable {
                 spokenText: fixTurn.spokenTake,
                 contextLabel: "Fixed · \(fixer.name)"
             )))
+
+            if let steeringInbox, steeringInbox.hasPending {
+                let (steeredSession, didSteer, postFixWaves) = try await applyBuildSteeringIfNeeded(
+                    steeringInbox: steeringInbox,
+                    into: session,
+                    moderator: moderator,
+                    debaters: debaters,
+                    remainingAssignments: [],
+                    roundNumber: 99,
+                    targetFolder: targetFolder,
+                    modelLabels: modelLabels,
+                    openRouterKey: openRouterKey,
+                    onEvent: onEvent
+                )
+                session = steeredSession
+                if didSteer && !postFixWaves.isEmpty {
+                    session = try await runExecutionWaves(
+                        waves: postFixWaves,
+                        into: session,
+                        moderator: moderator,
+                        allCouncil: allCouncil,
+                        debaters: debaters,
+                        excludingBuilder: nil,
+                        reviewerNameForRemediation: nil,
+                        remediationPassIndex: nil,
+                        targetFolder: targetFolder,
+                        folderName: folderName,
+                        modelLabels: modelLabels,
+                        openRouterKey: openRouterKey,
+                        steeringInbox: steeringInbox,
+                        filesSummary: &filesSummary,
+                        howToRun: &howToRun,
+                        onEvent: onEvent
+                    )
+                }
+            }
         }
 
         // --- INDEPENDENT COMPLETENESS REVIEWER & REMEDIATION LOOP (Until 100% Complete or Valid Blocker) ---
@@ -658,6 +765,50 @@ public final class DebateOrchestrator: Sendable {
                 finalCompletenessPercent = (isComplete && missingItems.isEmpty) ? max(pct, 100) : pct
                 if !acceptedBlockers.isEmpty {
                     finalAcceptedBlockers = acceptedBlockers
+                }
+
+                // If user sent live steering while Completeness Audit was running, address it before signing off!
+                if let steeringInbox, steeringInbox.hasPending {
+                    if isComplete && missingItems.isEmpty {
+                        let (steeredSession, didSteer, postAuditWaves) = try await applyBuildSteeringIfNeeded(
+                            steeringInbox: steeringInbox,
+                            into: session,
+                            moderator: moderator,
+                            debaters: debaters,
+                            remainingAssignments: [],
+                            roundNumber: 100 + passIndex,
+                            targetFolder: targetFolder,
+                            modelLabels: modelLabels,
+                            openRouterKey: openRouterKey,
+                            onEvent: onEvent
+                        )
+                        session = steeredSession
+                        if didSteer && !postAuditWaves.isEmpty {
+                            session = try await runExecutionWaves(
+                                waves: postAuditWaves,
+                                into: session,
+                                moderator: moderator,
+                                allCouncil: allCouncil,
+                                debaters: debaters,
+                                excludingBuilder: reviewer,
+                                reviewerNameForRemediation: nil,
+                                remediationPassIndex: passIndex,
+                                targetFolder: targetFolder,
+                                folderName: folderName,
+                                modelLabels: modelLabels,
+                                openRouterKey: openRouterKey,
+                                steeringInbox: steeringInbox,
+                                filesSummary: &filesSummary,
+                                howToRun: &howToRun,
+                                onEvent: onEvent
+                            )
+                            if passIndex < maxCompletenessPasses {
+                                continue
+                            }
+                        }
+                    } else {
+                        _ = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
+                    }
                 }
 
                 // Exit cleanly if 100% complete (or all remaining gaps are accepted legitimate blockers)!
@@ -772,6 +923,7 @@ public final class DebateOrchestrator: Sendable {
                     folderName: folderName,
                     modelLabels: modelLabels,
                     openRouterKey: openRouterKey,
+                    steeringInbox: steeringInbox,
                     filesSummary: &filesSummary,
                     howToRun: &howToRun,
                     onEvent: onEvent
@@ -815,6 +967,7 @@ public final class DebateOrchestrator: Sendable {
         modelLabels: [String: String],
         openRouterKey: String?,
         isIncrementalFollowUp: Bool,
+        steeringInbox: SteeringInbox?,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
@@ -829,6 +982,9 @@ public final class DebateOrchestrator: Sendable {
            }).first {
             session.title = Self.quickHeuristicTitle(from: firstPrompt)
         }
+
+        // Drain any steering queued right before Huddle starts
+        _ = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
 
         // Phase 1: Fast Parallel Architecture & Workstream Huddle
         session.stage = .debating
@@ -870,12 +1026,21 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
+        // Drain any live steering sent during Phase 1 Huddle so the Chair incorporates it directly into the Blueprint!
+        let huddleSteered = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
+        let blueprintExtraInstruction = huddleSteered
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+
         // Phase 2: Chair Synthesizes Concrete Multi-Agent Build Blueprint
         try Task.checkCancellation()
         session.stage = .synthesizingVerdict
         await onEvent(.activeThinkersChanged(
             [moderator.id],
-            statusLabel: "\(moderator.name) is locking in the Build Blueprint & assigning workstreams…"
+            statusLabel: huddleSteered.isEmpty
+                ? "\(moderator.name) is locking in the Build Blueprint & assigning workstreams…"
+                : "\(moderator.name) is applying your live steering & locking in the Build Blueprint…"
         ))
         await onEvent(.sessionUpdated(session))
 
@@ -886,7 +1051,8 @@ public final class DebateOrchestrator: Sendable {
             systemPrompt: DebatePrompts.buildBlueprintSystemPrompt(
                 moderator: moderator,
                 debaters: debaters,
-                workspacePath: targetFolder
+                workspacePath: targetFolder,
+                extraInstruction: blueprintExtraInstruction
             ),
             userPrompt: buildTranscriptContext(for: session),
             allowWebSearch: session.allowWebSearch,
@@ -916,6 +1082,7 @@ public final class DebateOrchestrator: Sendable {
             allPersonas: allPersonas,
             modelLabels: modelLabels,
             openRouterKey: openRouterKey,
+            steeringInbox: steeringInbox,
             onEvent: onEvent
         )
     }
@@ -1178,19 +1345,51 @@ public final class DebateOrchestrator: Sendable {
         folderName: String,
         modelLabels: [String: String],
         openRouterKey: String?,
+        steeringInbox: SteeringInbox?,
         filesSummary: inout [String],
         howToRun: inout String,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
-        let totalWaves = waves.count
         let webOn = session.allowWebSearch
+        var pendingWaves = waves
+        var completedWavesCount = 0
 
-        for wave in waves {
+        while true {
             try Task.checkCancellation()
-            let resolved: [(index: Int, assignment: ExecutionAssignment, executor: Persona)] = wave.items.enumerated().map { idx, item in
+
+            // Check live steering before starting the next wave AND right after the final wave finishes!
+            if let steeringInbox, steeringInbox.hasPending {
+                let remainingItems = pendingWaves.flatMap(\.items)
+                let steerRoundNum = remediationPassIndex.map { 110 + $0 } ?? 98
+                let (steeredSession, didSteer, updatedWaves) = try await applyBuildSteeringIfNeeded(
+                    steeringInbox: steeringInbox,
+                    into: session,
+                    moderator: moderator,
+                    debaters: debaters,
+                    remainingAssignments: remainingItems,
+                    roundNumber: steerRoundNum,
+                    targetFolder: targetFolder,
+                    modelLabels: modelLabels,
+                    openRouterKey: openRouterKey,
+                    onEvent: onEvent
+                )
+                session = steeredSession
+                if didSteer {
+                    pendingWaves = updatedWaves
+                }
+            }
+
+            guard !pendingWaves.isEmpty else { break }
+
+            let nextWave = pendingWaves.removeFirst()
+            completedWavesCount += 1
+            let currentWaveNumber = completedWavesCount
+            let totalWaves = completedWavesCount + pendingWaves.count
+
+            let resolved: [(index: Int, assignment: ExecutionAssignment, executor: Persona)] = nextWave.items.enumerated().map { idx, item in
                 var resolvedItem = item
-                resolvedItem.wave = wave.waveNumber
+                resolvedItem.wave = currentWaveNumber
                 let exec = allCouncil.first {
                     $0.name.localizedCaseInsensitiveContains(item.assignedPersonaName)
                     || item.assignedPersonaName.localizedCaseInsensitiveContains($0.name)
@@ -1205,8 +1404,8 @@ public final class DebateOrchestrator: Sendable {
 
             let isParallel = resolved.count > 1
             let activeNames = resolved.map(\.executor.name).joined(separator: ", ")
-            let prefixLabel = remediationPassIndex.map { "Remediation \($0) · Wave \(wave.waveNumber)/\(totalWaves)" }
-                ?? "Wave \(wave.waveNumber)/\(totalWaves)"
+            let prefixLabel = remediationPassIndex.map { "Remediation \($0) · Wave \(currentWaveNumber)/\(totalWaves)" }
+                ?? "Wave \(currentWaveNumber)/\(totalWaves)"
             let initialStatus = isParallel
                 ? "\(prefixLabel) (Parallel): \(activeNames) building simultaneously in \(folderName)…"
                 : "\(prefixLabel): \(resolved[0].executor.name) building in \(folderName)…"
@@ -1230,12 +1429,12 @@ public final class DebateOrchestrator: Sendable {
                     let roundTag: String = {
                         if let remPass = remediationPassIndex {
                             return isParallel
-                                ? "Remediation \(remPass) · Wave \(wave.waveNumber) (Parallel)"
-                                : "Remediation \(remPass) · Wave \(wave.waveNumber)"
+                                ? "Remediation \(remPass) · Wave \(currentWaveNumber) (Parallel)"
+                                : "Remediation \(remPass) · Wave \(currentWaveNumber)"
                         }
                         return isParallel
-                            ? "Wave \(wave.waveNumber)/\(totalWaves) · Parallel"
-                            : "Wave \(wave.waveNumber)/\(totalWaves)"
+                            ? "Wave \(currentWaveNumber)/\(totalWaves) · Parallel"
+                            : "Wave \(currentWaveNumber)/\(totalWaves)"
                     }()
 
                     group.addTask { [runner] in
@@ -1338,7 +1537,7 @@ public final class DebateOrchestrator: Sendable {
                         firstWaveError = firstWaveError ?? err
                         session.entries.append(.systemNote(
                             UUID(),
-                            "\(outcome.executor.name) encountered an error in Wave \(wave.waveNumber): \(err.localizedDescription)"
+                            "\(outcome.executor.name) encountered an error in Wave \(currentWaveNumber): \(err.localizedDescription)"
                         ))
                         session.updatedAt = Date()
                         await onEvent(.sessionUpdated(session))
@@ -1403,6 +1602,7 @@ public final class DebateOrchestrator: Sendable {
         modelLabels: [String: String],
         openRouterKey: String?,
         isFollowUpRound: Bool,
+        steeringInbox: SteeringInbox?,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
@@ -1415,6 +1615,24 @@ public final class DebateOrchestrator: Sendable {
                return nil
            }).first {
             session.title = Self.quickHeuristicTitle(from: firstPrompt)
+        }
+
+        // Check for any live steering queued right before Round 1 starts
+        if let steeringInbox, steeringInbox.hasPending {
+            let (steered, _, _) = try await applyDebateSteeringIfNeeded(
+                steeringInbox: steeringInbox,
+                into: session,
+                moderator: moderator,
+                debaters: debaters,
+                roundNumber: 1,
+                isNearEndOfDebate: false,
+                allowImmediatePeerReply: false,
+                nextScheduledDebaterID: nil,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                onEvent: onEvent
+            )
+            session = steered
         }
 
         // --- ROUND 1: Parallel Blind Research & Opening Stances ---
@@ -1460,8 +1678,23 @@ public final class DebateOrchestrator: Sendable {
             }
         }
 
-        // --- CHAIR FLOOR DIRECTION: Vera calls out the sharpest fault line between the personas! ---
-        if !isFollowUpRound && debaters.count >= 2 {
+        // --- CHAIR FLOOR DIRECTION (or immediate Live Steering if user steered during Round 1!) ---
+        if let steeringInbox, steeringInbox.hasPending {
+            let (steered, _, _) = try await applyDebateSteeringIfNeeded(
+                steeringInbox: steeringInbox,
+                into: session,
+                moderator: moderator,
+                debaters: debaters,
+                roundNumber: 1,
+                isNearEndOfDebate: false,
+                allowImmediatePeerReply: true,
+                nextScheduledDebaterID: rotate(debaters, by: 1).first?.id,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                onEvent: onEvent
+            )
+            session = steered
+        } else if !isFollowUpRound && debaters.count >= 2 {
             try Task.checkCancellation()
             await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is framing the clash on the floor…"))
             let r1Board = buildTranscriptContext(for: session)
@@ -1499,16 +1732,19 @@ public final class DebateOrchestrator: Sendable {
 
         // --- ROUNDS 2..N: Live Inter-Persona Conversation & Direct Exchanges (Fixed Count OR Until Consensus) ---
         let untilConsensus = !isFollowUpRound && session.runsUntilConsensus
-        let rebuttalCount: Int = {
+        let initialRebuttalCount: Int = {
             if isFollowUpRound { return 1 }
             if untilConsensus { return RebuttalPolicy.safetyMaxRounds }
             return max(1, session.maxRebuttalRounds)
         }()
+        let hardMaxRounds = RebuttalPolicy.safetyMaxRounds + 4
+        var targetRebuttalCount = initialRebuttalCount
+        var rebuttalIdx = 1
 
-        for rebuttalIdx in 1...rebuttalCount {
+        while rebuttalIdx <= targetRebuttalCount {
             try Task.checkCancellation()
             let roundNum = rebuttalIdx + 1
-            let isFinal = (rebuttalIdx == rebuttalCount)
+            var isFinal = (rebuttalIdx == targetRebuttalCount)
             let bannerTitle: String = {
                 if untilConsensus {
                     if isFinal {
@@ -1518,7 +1754,7 @@ public final class DebateOrchestrator: Sendable {
                         ? "Round \(roundNum) · Cross-Examination (Running Until Consensus)"
                         : "Round \(roundNum) · Convergence & Sticking-Point Resolution"
                 }
-                return (isFinal && rebuttalCount > 1)
+                return (isFinal && targetRebuttalCount > 1)
                     ? "Round \(roundNum) · Final Cross-Examination & Co-Sign Check"
                     : "Round \(roundNum) · Live Council Cross-Examination"
             }()
@@ -1536,10 +1772,38 @@ public final class DebateOrchestrator: Sendable {
 
             var roundTurns: [DebateTurn] = []
             var directRepliesTriggered = 0
+            var roundHadSteering = false
             let orderedDebaters = rotate(debaters, by: rebuttalIdx)
 
-            for debater in orderedDebaters {
+            for (debaterIdx, debater) in orderedDebaters.enumerated() {
                 try Task.checkCancellation()
+                let nextDebaterID = (debaterIdx + 1 < orderedDebaters.count) ? orderedDebaters[debaterIdx + 1].id : nil
+
+                // Check for live steering right before this debater takes the floor
+                if let steeringInbox, steeringInbox.hasPending {
+                    let (steered, didSteer, wantsExtra) = try await applyDebateSteeringIfNeeded(
+                        steeringInbox: steeringInbox,
+                        into: session,
+                        moderator: moderator,
+                        debaters: debaters,
+                        roundNumber: roundNum,
+                        isNearEndOfDebate: isFinal && (debaterIdx == orderedDebaters.count - 1),
+                        allowImmediatePeerReply: true,
+                        nextScheduledDebaterID: debater.id,
+                        modelLabels: modelLabels,
+                        openRouterKey: openRouterKey,
+                        onEvent: onEvent
+                    )
+                    session = steered
+                    if didSteer {
+                        roundHadSteering = true
+                        if wantsExtra && isFinal && targetRebuttalCount < hardMaxRounds {
+                            targetRebuttalCount += 1
+                            isFinal = false
+                        }
+                    }
+                }
+
                 let modeHint = untilConsensus ? " (Until Consensus)" : ""
                 await onEvent(.activeThinkersChanged([debater.id], statusLabel: "Round \(roundNum)\(modeHint): \(debater.name) has the floor…"))
 
@@ -1594,9 +1858,38 @@ public final class DebateOrchestrator: Sendable {
                     contextLabel: "Round \(roundNum) · \(debater.name)"
                 )))
 
-                // LIVE INTER-PERSONA BACK-AND-FORTH: If this debater put a direct question to a specific peer,
-                // hand the mic immediately to that peer for a brisk face-to-face answer (up to 1 direct exchange per round so pacing stays snappy)!
-                if !isFinal,
+                // AS SOON AS THIS TURN FINISHES: check if the user sent live steering!
+                // If steering arrived, pass it immediately to the Chair before any pre-steering peer exchange runs.
+                var steeredRightAfterTurn = false
+                if let steeringInbox, steeringInbox.hasPending {
+                    let (steered, didSteer, wantsExtra) = try await applyDebateSteeringIfNeeded(
+                        steeringInbox: steeringInbox,
+                        into: session,
+                        moderator: moderator,
+                        debaters: debaters,
+                        roundNumber: roundNum,
+                        isNearEndOfDebate: isFinal && (debaterIdx == orderedDebaters.count - 1),
+                        allowImmediatePeerReply: true,
+                        nextScheduledDebaterID: nextDebaterID,
+                        modelLabels: modelLabels,
+                        openRouterKey: openRouterKey,
+                        onEvent: onEvent
+                    )
+                    session = steered
+                    if didSteer {
+                        steeredRightAfterTurn = true
+                        roundHadSteering = true
+                        if wantsExtra && isFinal && targetRebuttalCount < hardMaxRounds {
+                            targetRebuttalCount += 1
+                            isFinal = false
+                        }
+                    }
+                }
+
+                // LIVE INTER-PERSONA BACK-AND-FORTH: If this debater put a direct question to a specific peer
+                // (and the user did not just redirect the floor with live steering), hand the floor immediately to that peer!
+                if !steeredRightAfterTurn,
+                   !isFinal,
                    directRepliesTriggered < 1,
                    let peerQuestion = turn.directQuestionForPeer, !peerQuestion.isEmpty,
                    let targetName = turn.targetPersonaName, !targetName.isEmpty,
@@ -1647,10 +1940,35 @@ public final class DebateOrchestrator: Sendable {
                         spokenText: replyTurn.spokenTake,
                         contextLabel: "\(challengedPeer.name) → \(debater.name)"
                     )))
+
+                    // Check again immediately after Direct Exchange finishes
+                    if let steeringInbox, steeringInbox.hasPending {
+                        let (steered, didSteer, wantsExtra) = try await applyDebateSteeringIfNeeded(
+                            steeringInbox: steeringInbox,
+                            into: session,
+                            moderator: moderator,
+                            debaters: debaters,
+                            roundNumber: roundNum,
+                            isNearEndOfDebate: isFinal && (debaterIdx == orderedDebaters.count - 1),
+                            allowImmediatePeerReply: true,
+                            nextScheduledDebaterID: nextDebaterID,
+                            modelLabels: modelLabels,
+                            openRouterKey: openRouterKey,
+                            onEvent: onEvent
+                        )
+                        session = steered
+                        if didSteer {
+                            roundHadSteering = true
+                            if wantsExtra && isFinal && targetRebuttalCount < hardMaxRounds {
+                                targetRebuttalCount += 1
+                                isFinal = false
+                            }
+                        }
+                    }
                 }
             }
 
-            let allConverged = !roundTurns.isEmpty && roundTurns.allSatisfy {
+            let allConverged = !roundHadSteering && !roundTurns.isEmpty && roundTurns.allSatisfy {
                 $0.stance == .cosigning || $0.stance == .conceding
             }
             if allConverged && !isFinal {
@@ -1660,50 +1978,99 @@ public final class DebateOrchestrator: Sendable {
             // In "Until Consensus" mode (from Round 3 onward), let the Chair actively mediate and check whether consensus is reached!
             if untilConsensus && !isFinal && rebuttalIdx >= 2 && debaters.count >= 2 {
                 try Task.checkCancellation()
-                await onEvent(.activeThinkersChanged(
-                    [moderator.id],
-                    statusLabel: "\(moderator.name) is checking consensus & mediating Round \(roundNum)…"
-                ))
-                let board = buildTranscriptContext(for: session)
-                if let medResp = try? await callModel(ModelCallRequest(
-                    provider: moderator.provider,
-                    modelID: moderator.modelID,
-                    effort: .medium,
-                    systemPrompt: DebatePrompts.chairConsensusMediationPrompt(
+                if let steeringInbox, steeringInbox.hasPending {
+                    let (steered, _, _) = try await applyDebateSteeringIfNeeded(
+                        steeringInbox: steeringInbox,
+                        into: session,
                         moderator: moderator,
                         debaters: debaters,
-                        roundNumber: roundNum
-                    ),
-                    userPrompt: board,
-                    allowWebSearch: false,
-                    toolPhase: .closedBook,
-                    workspacePath: session.workspacePath,
-                    openRouterAPIKey: openRouterKey
-                ), in: session) {
-                    let medJSON = JSONExtractor.parseObject(medResp.rawText)
-                    let consensusReached = (medJSON?["consensus_reached"] as? Bool) ?? false
-                    let medTurn = parseDebateTurn(
-                        raw: medResp.rawText,
-                        durationMs: medResp.durationMs,
                         roundNumber: roundNum,
-                        roundLabel: consensusReached ? "Chair · Consensus Reached" : "Chair · Mediating",
-                        persona: moderator,
-                        modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
-                        defaultStance: .moderating
+                        isNearEndOfDebate: false,
+                        allowImmediatePeerReply: true,
+                        nextScheduledDebaterID: nil,
+                        modelLabels: modelLabels,
+                        openRouterKey: openRouterKey,
+                        onEvent: onEvent
                     )
-                    session.entries.append(.turn(medTurn))
-                    session.updatedAt = Date()
-                    await onEvent(.sessionUpdated(session))
-                    await onEvent(.enqueueSpeech(SpeechQueueItem(
-                        id: medTurn.id,
-                        persona: moderator,
-                        spokenText: medTurn.spokenTake,
-                        contextLabel: consensusReached ? "\(moderator.name) · Consensus" : "\(moderator.name) · Mediating"
-                    )))
-                    if consensusReached {
-                        break
+                    session = steered
+                } else {
+                    await onEvent(.activeThinkersChanged(
+                        [moderator.id],
+                        statusLabel: "\(moderator.name) is checking consensus & mediating Round \(roundNum)…"
+                    ))
+                    let board = buildTranscriptContext(for: session)
+                    if let medResp = try? await callModel(ModelCallRequest(
+                        provider: moderator.provider,
+                        modelID: moderator.modelID,
+                        effort: .medium,
+                        systemPrompt: DebatePrompts.chairConsensusMediationPrompt(
+                            moderator: moderator,
+                            debaters: debaters,
+                            roundNumber: roundNum
+                        ),
+                        userPrompt: board,
+                        allowWebSearch: false,
+                        toolPhase: .closedBook,
+                        workspacePath: session.workspacePath,
+                        openRouterAPIKey: openRouterKey
+                    ), in: session) {
+                        let medJSON = JSONExtractor.parseObject(medResp.rawText)
+                        let consensusReached = (medJSON?["consensus_reached"] as? Bool) ?? false
+                        let medTurn = parseDebateTurn(
+                            raw: medResp.rawText,
+                            durationMs: medResp.durationMs,
+                            roundNumber: roundNum,
+                            roundLabel: consensusReached ? "Chair · Consensus Reached" : "Chair · Mediating",
+                            persona: moderator,
+                            modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
+                            defaultStance: .moderating
+                        )
+                        session.entries.append(.turn(medTurn))
+                        session.updatedAt = Date()
+                        await onEvent(.sessionUpdated(session))
+                        await onEvent(.enqueueSpeech(SpeechQueueItem(
+                            id: medTurn.id,
+                            persona: moderator,
+                            spokenText: medTurn.spokenTake,
+                            contextLabel: consensusReached ? "\(moderator.name) · Consensus" : "\(moderator.name) · Mediating"
+                        )))
+                        if consensusReached && (steeringInbox?.hasPending != true) {
+                            break
+                        }
                     }
                 }
+            }
+
+            rebuttalIdx += 1
+        }
+
+        // Check for any steering right before Verdict synthesis
+        if let steeringInbox, steeringInbox.hasPending {
+            let (steered, _, wantsExtra) = try await applyDebateSteeringIfNeeded(
+                steeringInbox: steeringInbox,
+                into: session,
+                moderator: moderator,
+                debaters: debaters,
+                roundNumber: targetRebuttalCount + 1,
+                isNearEndOfDebate: true,
+                allowImmediatePeerReply: true,
+                nextScheduledDebaterID: nil,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                onEvent: onEvent
+            )
+            session = steered
+            if wantsExtra {
+                session = try await runSingleSteeredRebuttalPass(
+                    into: session,
+                    roundNumber: targetRebuttalCount + 2,
+                    moderator: moderator,
+                    debaters: debaters,
+                    modelLabels: modelLabels,
+                    openRouterKey: openRouterKey,
+                    steeringInbox: steeringInbox,
+                    onEvent: onEvent
+                )
             }
         }
 
@@ -1713,8 +2080,7 @@ public final class DebateOrchestrator: Sendable {
         await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is drafting the Co-Signed Verdict…"))
         await onEvent(.sessionUpdated(session))
 
-        let fullTranscript = buildTranscriptContext(for: session)
-        let verdictResp = try await callModel(ModelCallRequest(
+        var verdictResp = try await callModel(ModelCallRequest(
             provider: moderator.provider,
             modelID: moderator.modelID,
             effort: moderator.effort,
@@ -1723,12 +2089,60 @@ public final class DebateOrchestrator: Sendable {
                 debaters: debaters,
                 toolsEnabled: session.hasFullCLITools
             ),
-            userPrompt: fullTranscript,
+            userPrompt: buildTranscriptContext(for: session),
             allowWebSearch: session.allowWebSearch,
             toolPhase: researchPhase(for: session),
             workspacePath: session.workspacePath,
             openRouterAPIKey: openRouterKey
         ), in: session)
+
+        // If the user sent live steering while the Verdict was mid-generation, incorporate it before finalizing!
+        if let steeringInbox, steeringInbox.hasPending {
+            let (steered, _, wantsExtra) = try await applyDebateSteeringIfNeeded(
+                steeringInbox: steeringInbox,
+                into: session,
+                moderator: moderator,
+                debaters: debaters,
+                roundNumber: targetRebuttalCount + 2,
+                isNearEndOfDebate: true,
+                allowImmediatePeerReply: true,
+                nextScheduledDebaterID: nil,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                onEvent: onEvent
+            )
+            session = steered
+            if wantsExtra {
+                session = try await runSingleSteeredRebuttalPass(
+                    into: session,
+                    roundNumber: targetRebuttalCount + 3,
+                    moderator: moderator,
+                    debaters: debaters,
+                    modelLabels: modelLabels,
+                    openRouterKey: openRouterKey,
+                    steeringInbox: steeringInbox,
+                    onEvent: onEvent
+                )
+            }
+            session.stage = .synthesizingVerdict
+            await onEvent(.activeThinkersChanged([moderator.id], statusLabel: "\(moderator.name) is updating the Co-Signed Verdict with your steering…"))
+            await onEvent(.sessionUpdated(session))
+            verdictResp = try await callModel(ModelCallRequest(
+                provider: moderator.provider,
+                modelID: moderator.modelID,
+                effort: moderator.effort,
+                systemPrompt: DebatePrompts.verdictSystemPrompt(
+                    moderator: moderator,
+                    debaters: debaters,
+                    toolsEnabled: session.hasFullCLITools
+                ),
+                userPrompt: buildTranscriptContext(for: session),
+                allowWebSearch: session.allowWebSearch,
+                toolPhase: researchPhase(for: session),
+                workspacePath: session.workspacePath,
+                openRouterAPIKey: openRouterKey
+            ), in: session)
+        }
 
         let verdict = parseVerdict(raw: verdictResp.rawText, moderator: moderator, debaters: debaters)
         session.entries.append(.verdict(verdict))
@@ -1757,6 +2171,7 @@ public final class DebateOrchestrator: Sendable {
                 allPersonas: allPersonas,
                 modelLabels: modelLabels,
                 openRouterKey: openRouterKey,
+                steeringInbox: steeringInbox,
                 onEvent: onEvent
             )
         }
@@ -1849,6 +2264,7 @@ public final class DebateOrchestrator: Sendable {
         debaters: [Persona],
         modelLabels: [String: String],
         openRouterKey: String?,
+        steeringInbox: SteeringInbox?,
         onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
     ) async throws -> DebateSession {
         var session = initialSession
@@ -1886,10 +2302,7 @@ public final class DebateOrchestrator: Sendable {
             defaultStance: .followup
         )
         session.entries.append(.turn(turn))
-        session.stage = .completed
         session.updatedAt = Date()
-
-        await onEvent(.activeThinkersChanged([], statusLabel: "Ready"))
         await onEvent(.sessionUpdated(session))
         await onEvent(.enqueueSpeech(SpeechQueueItem(
             id: turn.id,
@@ -1897,7 +2310,366 @@ public final class DebateOrchestrator: Sendable {
             spokenText: turn.spokenTake,
             contextLabel: "Reply · \(target.name)"
         )))
+
+        // If user sent live steering while the direct reply was running, let the Chair address it immediately!
+        if let steeringInbox, steeringInbox.hasPending {
+            let (steered, _, _) = try await applyDebateSteeringIfNeeded(
+                steeringInbox: steeringInbox,
+                into: session,
+                moderator: moderator,
+                debaters: debaters,
+                roundNumber: 0,
+                isNearEndOfDebate: false,
+                allowImmediatePeerReply: true,
+                nextScheduledDebaterID: nil,
+                modelLabels: modelLabels,
+                openRouterKey: openRouterKey,
+                onEvent: onEvent
+            )
+            session = steered
+        }
+
+        session.stage = .completed
+        session.updatedAt = Date()
+        await onEvent(.activeThinkersChanged([], statusLabel: "Ready"))
+        await onEvent(.sessionUpdated(session))
         return session
+    }
+
+    // MARK: - Live User Steering Helpers (Chair-Directed Immediate Uptake)
+
+    private func drainSteeringMessages(
+        _ steeringInbox: SteeringInbox?,
+        into session: inout DebateSession,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async -> [UserPromptMessage] {
+        guard let steeringInbox else { return [] }
+        let drained = steeringInbox.drainAll()
+        guard !drained.isEmpty else { return [] }
+        for var msg in drained {
+            if msg.isSteering == nil {
+                msg.isSteering = true
+            }
+            session.entries.append(.userPrompt(msg))
+        }
+        session.updatedAt = Date()
+        await onEvent(.sessionUpdated(session))
+        return drained
+    }
+
+    private static func formatSteeringTexts(_ messages: [UserPromptMessage]) -> [String] {
+        messages.compactMap { msg -> String? in
+            var text = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !msg.imageAttachments.isEmpty {
+                let paths = msg.imageAttachments.map { "\($0.displayName): \($0.filePath)" }.joined(separator: ", ")
+                text = text.isEmpty ? "[Attached image(s): \(paths)]" : "\(text) [Attached image(s): \(paths)]"
+            }
+            return text.isEmpty ? nil : text
+        }
+    }
+
+    private func applyDebateSteeringIfNeeded(
+        steeringInbox: SteeringInbox?,
+        into initialSession: DebateSession,
+        moderator: Persona,
+        debaters: [Persona],
+        roundNumber: Int,
+        isNearEndOfDebate: Bool,
+        allowImmediatePeerReply: Bool,
+        nextScheduledDebaterID: UUID?,
+        modelLabels: [String: String],
+        openRouterKey: String?,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async throws -> (session: DebateSession, handledSteering: Bool, needsExtraRound: Bool) {
+        var session = initialSession
+        let drained = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
+        let steeringTexts = Self.formatSteeringTexts(drained)
+        guard !steeringTexts.isEmpty else {
+            return (session, false, false)
+        }
+
+        try Task.checkCancellation()
+        session.stage = .debating
+        await onEvent(.activeThinkersChanged(
+            [moderator.id],
+            statusLabel: "\(moderator.name) is reading your live steering & directing the panel…"
+        ))
+        await onEvent(.sessionUpdated(session))
+
+        let steerResp = try await callModel(ModelCallRequest(
+            provider: moderator.provider,
+            modelID: moderator.modelID,
+            effort: moderator.effort,
+            systemPrompt: DebatePrompts.chairLiveSteeringPrompt(
+                moderator: moderator,
+                debaters: debaters,
+                steeringTexts: steeringTexts,
+                isNearEndOfDebate: isNearEndOfDebate
+            ),
+            userPrompt: buildTranscriptContext(for: session),
+            allowWebSearch: session.allowWebSearch,
+            toolPhase: researchPhase(for: session),
+            workspacePath: session.workspacePath,
+            openRouterAPIKey: openRouterKey
+        ), in: session)
+
+        let parsed = JSONExtractor.parseObject(steerResp.rawText)
+        let needsExtra = (parsed?["needs_extra_round"] as? Bool) ?? false
+
+        let chairTurn = parseDebateTurn(
+            raw: steerResp.rawText,
+            durationMs: steerResp.durationMs,
+            roundNumber: roundNumber,
+            roundLabel: "Live Steering",
+            persona: moderator,
+            modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
+            defaultStance: .moderating
+        )
+        session.entries.append(.turn(chairTurn))
+        session.updatedAt = Date()
+        await onEvent(.sessionUpdated(session))
+        await onEvent(.enqueueSpeech(SpeechQueueItem(
+            id: chairTurn.id,
+            persona: moderator,
+            spokenText: chairTurn.spokenTake,
+            contextLabel: "Live Steering · \(moderator.name)"
+        )))
+
+        // If the Chair routed a direct question to a specific panelist who is NOT already scheduled next, let them answer right now!
+        if allowImmediatePeerReply,
+           let peerQ = chairTurn.directQuestionForPeer, !peerQ.isEmpty,
+           let targetName = chairTurn.targetPersonaName, !targetName.isEmpty,
+           let targetPeer = debaters.first(where: {
+               $0.id != moderator.id && ($0.name.localizedCaseInsensitiveContains(targetName) || targetName.localizedCaseInsensitiveContains($0.name))
+           }),
+           targetPeer.id != nextScheduledDebaterID {
+            try Task.checkCancellation()
+            await onEvent(.activeThinkersChanged(
+                [targetPeer.id],
+                statusLabel: "\(targetPeer.name) is answering \(moderator.name)'s steered question…"
+            ))
+            let replyResp = try await callModel(ModelCallRequest(
+                provider: targetPeer.provider,
+                modelID: targetPeer.modelID,
+                effort: targetPeer.effort,
+                systemPrompt: DebatePrompts.peerDirectReplyPrompt(
+                    responder: targetPeer,
+                    challengerName: moderator.name,
+                    question: peerQ,
+                    workspacePath: session.workspacePath,
+                    toolsEnabled: session.hasFullCLITools
+                ),
+                userPrompt: buildTranscriptContext(for: session),
+                allowWebSearch: session.allowWebSearch,
+                toolPhase: researchPhase(for: session),
+                workspacePath: session.workspacePath,
+                openRouterAPIKey: openRouterKey
+            ), in: session)
+            let replyTurn = parseDebateTurn(
+                raw: replyResp.rawText,
+                durationMs: replyResp.durationMs,
+                roundNumber: roundNumber,
+                roundLabel: "Steered Reply",
+                persona: targetPeer,
+                modelLabel: modelLabels[targetPeer.modelID] ?? targetPeer.modelID,
+                defaultStance: .replying
+            )
+            session.entries.append(.turn(replyTurn))
+            session.updatedAt = Date()
+            await onEvent(.sessionUpdated(session))
+            await onEvent(.enqueueSpeech(SpeechQueueItem(
+                id: replyTurn.id,
+                persona: targetPeer,
+                spokenText: replyTurn.spokenTake,
+                contextLabel: "\(targetPeer.name) → \(moderator.name)"
+            )))
+        }
+
+        return (session, true, needsExtra)
+    }
+
+    private func runSingleSteeredRebuttalPass(
+        into initialSession: DebateSession,
+        roundNumber: Int,
+        moderator: Persona,
+        debaters: [Persona],
+        modelLabels: [String: String],
+        openRouterKey: String?,
+        steeringInbox: SteeringInbox?,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async throws -> DebateSession {
+        var session = initialSession
+        session.stage = .debating
+        session.entries.append(.roundBanner(RoundBanner(
+            roundNumber: roundNumber,
+            title: "Round \(roundNumber) · Steered Council Response",
+            subtitle: "Panelists respond to \(moderator.name)'s updated steering direction before the verdict"
+        )))
+        await onEvent(.sessionUpdated(session))
+
+        for debater in debaters {
+            try Task.checkCancellation()
+            await onEvent(.activeThinkersChanged([debater.id], statusLabel: "Round \(roundNumber): \(debater.name) is addressing your steering…"))
+            let resp = try await callModel(ModelCallRequest(
+                provider: debater.provider,
+                modelID: debater.modelID,
+                effort: debater.effort,
+                systemPrompt: DebatePrompts.rebuttalSystemPrompt(
+                    debater: debater,
+                    allDebaters: debaters,
+                    moderatorName: moderator.name,
+                    roundNumber: roundNumber,
+                    isFinalRebuttal: true,
+                    untilConsensusMode: false,
+                    workspacePath: session.workspacePath,
+                    toolsEnabled: session.hasFullCLITools
+                ),
+                userPrompt: buildTranscriptContext(for: session),
+                allowWebSearch: session.allowWebSearch,
+                toolPhase: researchPhase(for: session),
+                workspacePath: session.workspacePath,
+                openRouterAPIKey: openRouterKey
+            ), in: session)
+            let turn = parseDebateTurn(
+                raw: resp.rawText,
+                durationMs: resp.durationMs,
+                roundNumber: roundNumber,
+                roundLabel: "Round \(roundNumber)",
+                persona: debater,
+                modelLabel: modelLabels[debater.modelID] ?? debater.modelID,
+                defaultStance: .cosigning
+            )
+            session.entries.append(.turn(turn))
+            session.updatedAt = Date()
+            await onEvent(.sessionUpdated(session))
+            await onEvent(.enqueueSpeech(SpeechQueueItem(
+                id: turn.id,
+                persona: debater,
+                spokenText: turn.spokenTake,
+                contextLabel: "Round \(roundNumber) · \(debater.name)"
+            )))
+
+            if let steeringInbox, steeringInbox.hasPending {
+                let (steered, _, _) = try await applyDebateSteeringIfNeeded(
+                    steeringInbox: steeringInbox,
+                    into: session,
+                    moderator: moderator,
+                    debaters: debaters,
+                    roundNumber: roundNumber,
+                    isNearEndOfDebate: false,
+                    allowImmediatePeerReply: false,
+                    nextScheduledDebaterID: nil,
+                    modelLabels: modelLabels,
+                    openRouterKey: openRouterKey,
+                    onEvent: onEvent
+                )
+                session = steered
+            }
+        }
+        return session
+    }
+
+    private func applyBuildSteeringIfNeeded(
+        steeringInbox: SteeringInbox?,
+        into initialSession: DebateSession,
+        moderator: Persona,
+        debaters: [Persona],
+        remainingAssignments: [ExecutionAssignment],
+        roundNumber: Int,
+        targetFolder: String,
+        modelLabels: [String: String],
+        openRouterKey: String?,
+        onEvent: @escaping @Sendable (OrchestratorEvent) async -> Void
+    ) async throws -> (session: DebateSession, didSteer: Bool, updatedWaves: [ExecutionWave]) {
+        var session = initialSession
+        let drained = await drainSteeringMessages(steeringInbox, into: &session, onEvent: onEvent)
+        let steeringTexts = Self.formatSteeringTexts(drained)
+        guard !steeringTexts.isEmpty else {
+            return (session, false, Self.partitionIntoParallelWaves(remainingAssignments, workspaceRoot: targetFolder))
+        }
+
+        try Task.checkCancellation()
+        session.stage = .synthesizingVerdict
+        await onEvent(.activeThinkersChanged(
+            [moderator.id],
+            statusLabel: "\(moderator.name) is reading your live steering & updating build workstreams…"
+        ))
+        await onEvent(.sessionUpdated(session))
+
+        let steerResp = try await callModel(ModelCallRequest(
+            provider: moderator.provider,
+            modelID: moderator.modelID,
+            effort: moderator.effort,
+            systemPrompt: DebatePrompts.buildLiveSteeringPrompt(
+                moderator: moderator,
+                debaters: debaters,
+                steeringTexts: steeringTexts,
+                remainingAssignments: remainingAssignments,
+                workspacePath: targetFolder
+            ),
+            userPrompt: buildTranscriptContext(for: session),
+            allowWebSearch: session.allowWebSearch,
+            toolPhase: .researchAndInspect,
+            workspacePath: targetFolder,
+            openRouterAPIKey: openRouterKey
+        ), in: session)
+
+        let steerTurn = parseDebateTurn(
+            raw: steerResp.rawText,
+            durationMs: steerResp.durationMs,
+            roundNumber: roundNumber,
+            roundLabel: "Live Steering",
+            persona: moderator,
+            modelLabel: modelLabels[moderator.modelID] ?? moderator.modelID,
+            defaultStance: .moderating
+        )
+        session.entries.append(.turn(steerTurn))
+        session.updatedAt = Date()
+        await onEvent(.sessionUpdated(session))
+        await onEvent(.enqueueSpeech(SpeechQueueItem(
+            id: steerTurn.id,
+            persona: moderator,
+            spokenText: steerTurn.spokenTake,
+            contextLabel: "Live Steering · \(moderator.name)"
+        )))
+
+        var updatedAssignments: [ExecutionAssignment] = []
+        var parsedHasExplicitArray = false
+        if let json = JSONExtractor.parseObject(steerResp.rawText),
+           let rawAssign = json["execution_assignments"] as? [[String: Any]] {
+            parsedHasExplicitArray = true
+            for item in rawAssign.prefix(8) {
+                guard let who = (item["assigned_to"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      let instr = (item["task_instruction"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !who.isEmpty, !instr.isEmpty else { continue }
+                let scope = (item["target_scope"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let wave = Self.parseWave(item["wave"])
+                updatedAssignments.append(ExecutionAssignment(
+                    assignedPersonaName: who,
+                    taskInstruction: instr,
+                    targetScope: scope,
+                    wave: wave
+                ))
+            }
+        }
+
+        if !parsedHasExplicitArray {
+            updatedAssignments = remainingAssignments
+            let combinedSteering = steeringTexts.joined(separator: "\n")
+            let fallbackBuilder = selectPrimaryBuilder(from: debaters, excluding: nil, fallback: moderator, forTask: combinedSteering)
+            let nextWaveNum = (remainingAssignments.map(\.effectiveWave).max() ?? 0) + 1
+            updatedAssignments.append(ExecutionAssignment(
+                assignedPersonaName: fallbackBuilder.name,
+                taskInstruction: "Implement the user's live steering instruction in \(targetFolder):\n\(combinedSteering)",
+                targetScope: targetFolder,
+                wave: nextWaveNum
+            ))
+        }
+
+        let newWaves = Self.partitionIntoParallelWaves(updatedAssignments, workspaceRoot: targetFolder)
+        session.stage = .executingPlan
+        await onEvent(.sessionUpdated(session))
+        return (session, true, newWaves)
     }
 
     // MARK: - Parsing & Formatting Helpers
@@ -2120,7 +2892,14 @@ public final class DebateOrchestrator: Sendable {
         for entry in session.entries {
             switch entry {
             case .userPrompt(let msg):
-                var uBlock = "USER PROMPT:\n\(msg.text)"
+                let header: String
+                if msg.isSteering == true {
+                    let recipient = (msg.steeredToPersonaName?.isEmpty == false) ? " -> DIRECTED TO \(msg.steeredToPersonaName!.uppercased())" : ""
+                    header = "USER LIVE STEERING COMMENT (HIGHEST PRIORITY — APPLY IMMEDIATELY\(recipient)):"
+                } else {
+                    header = "USER PROMPT:"
+                }
+                var uBlock = "\(header)\n\(msg.text)"
                 if !msg.imageAttachments.isEmpty {
                     uBlock += "\nATTACHED USER IMAGE(S):\n" + msg.imageAttachments.map {
                         "- [\($0.displayName)] \($0.filePath)"
@@ -2129,7 +2908,7 @@ public final class DebateOrchestrator: Sendable {
                 sections.append(uBlock)
             case .interview(let ex):
                 if ex.wasSkipped {
-                    sections.append("CLARIFYING INTERVIEW: User asked the panel to make reasonable assumptions and debate open forks directly.")
+                    sections.append("CLARIFYING INTERVIEW: User asked the panel to make reasonable assumptions and debate open questions directly.")
                 } else if ex.isSubmitted {
                     var lines = ["CLARIFYING INTERVIEW ANSWERS FROM USER:"]
                     for q in ex.questions {

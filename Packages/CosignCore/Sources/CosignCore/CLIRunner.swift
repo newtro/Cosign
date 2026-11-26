@@ -316,7 +316,7 @@ public final class LiveCLIRunner: ModelRunnerProtocol, @unchecked Sendable {
         case .researchAndInspect:
             fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read/research access to local repos (working directory: \(cwd.path)), `git`, `gh` (GitHub CLI), MCP servers, web search, and parallel read-only sub-agents. STRICT RULE FOR THIS TURN: Do NOT edit, write, create, or delete any files—only inspect, read, and research."
         case .coordinatedReadWrite:
-            fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read + write + shell access in \(cwd.path) AND full freedom to spawn your own sub-agents and parallel tool calls to divide & conquer your assigned scope rapidly. Stay strictly within your assigned file/directory scope so concurrent council teammates are never disrupted."
+            fullPrompt += "\n\nTOOL & SUB-AGENT ACCESS: You have full read + write + shell access in \(cwd.path) AND full freedom to spawn your own sub-agents and parallel tool calls to split up your assigned scope rapidly. Stay strictly within your assigned file/directory scope so concurrent council teammates are never disrupted."
         }
 
         let validImages = Self.existingImagePaths(from: req.imagePaths)
